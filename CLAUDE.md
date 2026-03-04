@@ -264,15 +264,24 @@ Tool can accept any NetCDF matching the dimension/CRS structure above.
 
 | Output | Pattern | Location |
 |--------|---------|----------|
+| Parquet time series | `{VI}_{region_label}_timeseries.parquet` | per-region subdirectory |
+| Combined shapefile Parquet | `{VI}_{shapefile_stem}_timeseries.parquet` | shapefile root folder |
 | Observations CSV | `{VI}_{region_label}_observations.csv` | per-region subdirectory |
 | Combined observations CSV | `{VI}_{shapefile_stem}_timeseries.csv` | shapefile root folder |
-| Parquet time series | `{VI}_{region_label}_timeseries.parquet` | per-region subdirectory |
 | Per-region metrics CSV | `{VI}_{region_label}_metrics.csv` | per-region subdirectory |
 | Combined shapefile metrics CSV | `{VI}_{shapefile_stem}_metrics.csv` | shapefile root folder |
 | Annual phenology plot | `{VI}_{region_label}_annual.{ext}` | per-region subdirectory |
 | Full time-series plot | `{VI}_{region_label}_timeseries.{ext}` | per-region subdirectory |
 | Anomaly plot | `{VI}_{region_label}_anomaly.{ext}` | per-region subdirectory |
 | Multi-VI comparison | `{region_label}_multi_vi.{ext}` | per-region subdirectory |
+
+Per-region Parquet: full daily series (all 365 rows/year including NaN gap days, `vi_smooth`,
+`vi_smooth_flag`). Complete Layer 1 + Layer 2 record. Columns: `date, vi_raw, vi_count, vi_std,
+vi_daily` plus `vi_smooth, vi_smooth_flag` when smoothing is applied.
+
+Combined shapefile Parquet: all regions stacked with a leading `region` column; contains the
+same full daily rows as the per-region files. Written to the shapefile root folder when
+`--shapefile-field` yields multiple regions. Skipped for dissolved shapefiles and full-extent runs.
 
 Observations CSV: always written per-region. Contains only `vi_count > 0` rows (actual HLS
 acquisitions). No gap-filled or interpolated rows. Columns: `date, vi_raw, vi_count, vi_std`

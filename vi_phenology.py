@@ -36,7 +36,7 @@ from extract import (
 from smooth import smooth_timeseries
 from metrics import compute_metrics, write_combined_metrics
 from plot import generate_plots
-from io_utils import save_parquet, save_observations_csv, write_combined_observations_csv
+from io_utils import save_parquet, save_observations_csv, write_combined_observations_csv, write_combined_parquet
 
 logger = logging.getLogger(__name__)
 
@@ -299,6 +299,7 @@ def main():
     # Accumulate metrics rows and observation data across all regions for combined CSVs.
     all_metrics: list[pd.DataFrame] = []
     all_obs: dict = {}
+    all_parquet: dict = {}
     any_extracted = False
 
     # ── Per-region streaming pipeline ────────────────────────────────────────
@@ -359,7 +360,9 @@ def main():
 
         # Save Parquet and observations CSV for this region.
         logger.info("[Output] Saving Parquet and CSV for region '%s' ...", region_label)
-        save_parquet(region_raw, region_smoothed, config)
+        region_parquet = save_parquet(region_raw, region_smoothed, config)
+        for key, dfs in region_parquet.items():
+            all_parquet.setdefault(key, []).extend(dfs)
         region_obs = save_observations_csv(region_raw, region_smoothed, config)
         for key, dfs in region_obs.items():
             all_obs.setdefault(key, []).extend(dfs)
@@ -394,6 +397,9 @@ def main():
     if config.compute_metrics and all_metrics:
         all_metrics_df = pd.concat(all_metrics, ignore_index=True)
         write_combined_metrics(all_metrics_df, config)
+
+    # Combined shapefile Parquet (full daily series; written after all regions are complete).
+    write_combined_parquet(all_parquet, config)
 
     # Combined shapefile observations CSV (written after all regions are complete).
     write_combined_observations_csv(all_obs, config)

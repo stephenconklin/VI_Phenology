@@ -57,7 +57,7 @@ def discover_netcdfs_for_vi(netcdf_dir: Path, vi: str) -> list:
 # Parquet I/O
 # ---------------------------------------------------------------------------
 
-def save_parquet(raw: dict, smoothed: Optional[dict], config: PhenologyConfig):
+def save_parquet(raw: dict, smoothed: Optional[dict], config: PhenologyConfig) -> dict:
     """Merge Layer 1 (raw) and Layer 2 (smooth) data and save to Parquet.
 
     One file per (vi, region_label). Columns written:
@@ -75,7 +75,14 @@ def save_parquet(raw: dict, smoothed: Optional[dict], config: PhenologyConfig):
         raw:      dict from extract_timeseries()
         smoothed: dict from smooth_timeseries(), or None
         config:   PhenologyConfig
+
+    Returns:
+        dict keyed by (vi, shapefile_stem) → list[pd.DataFrame] for use by
+        write_combined_parquet(). Each DataFrame has a leading 'region' column
+        and contains the full daily series (all rows, including NaN gap days).
     """
+    accumulated: dict = {}
+
     for (vi, region_label), df in raw.items():
         out_dir = config.output_dir_for(region_label)
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -92,6 +99,14 @@ def save_parquet(raw: dict, smoothed: Optional[dict], config: PhenologyConfig):
             "Saved Parquet: %s  (%d rows, columns: %s)",
             out_path, len(out_df), list(out_df.columns),
         )
+
+        # Accumulate for combined Parquet — add region identifier column.
+        row_df = out_df.copy()
+        row_df.insert(0, 'region', region_label)
+        shapefile_stem = config._region_shapefile_map.get(region_label, region_label)
+        accumulated.setdefault((vi, shapefile_stem), []).append(row_df)
+
+    return accumulated
 
 
 def save_observations_csv(
@@ -185,6 +200,49 @@ def write_combined_observations_csv(all_obs: dict, config: PhenologyConfig) -> N
         logger.info(
             "Saved combined observations CSV (%d region(s), %d rows): %s",
             combined['region'].nunique(), len(combined), out_path,
+        )
+
+
+def write_combined_parquet(all_parquet: dict, config: PhenologyConfig) -> None:
+    """Write a combined full-daily-series Parquet per shapefile, stacking all regions.
+
+    Produced only when a shapefile contributes more than one region (i.e. when
+    --shapefile-field is active and yields multiple distinct field values).
+    Skipped for full_extent runs and dissolved single-region shapefiles.
+
+    Unlike the observations CSV, this file contains ALL daily rows including NaN
+    gap days, vi_smooth, and vi_smooth_flag — the complete Layer 1 + Layer 2 record
+    for all regions in one file.
+
+    Columns: region, date, vi_raw, vi_count, vi_std, vi_daily[, vi_smooth, vi_smooth_flag]
+    Rows sorted by (region, date).
+
+    Output path: config.output_dir / {shapefile_stem} / '{VI}_{shapefile_stem}_timeseries.parquet'
+
+    Args:
+        all_parquet: dict returned by (and accumulated across calls to) save_parquet()
+        config:      PhenologyConfig
+    """
+    if not config.shapefiles:
+        return
+
+    for (vi, shapefile_stem), dfs in all_parquet.items():
+        if len(dfs) <= 1:
+            # Single region — combined Parquet would duplicate the per-region file.
+            continue
+
+        combined = (
+            pd.concat(dfs, ignore_index=True)
+            .sort_values(['region', 'date'])
+            .reset_index(drop=True)
+        )
+        out_dir = config.output_dir / shapefile_stem
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"{vi}_{shapefile_stem}_timeseries.parquet"
+        combined.to_parquet(out_path, index=False, engine='pyarrow')
+        logger.info(
+            "Saved combined Parquet (%d region(s), %d rows, columns: %s): %s",
+            combined['region'].nunique(), len(combined), list(combined.columns), out_path,
         )
 
 
