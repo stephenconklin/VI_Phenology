@@ -1,0 +1,22 @@
+name: vi_phenology
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - numpy
+  - pandas
+  - xarray
+  - rasterio
+  - rioxarray
+  - geopandas
+  - netcdf4
+  - dask
+  - scipy
+  - statsmodels
+  - pyarrow
+  - plotly
+  - matplotlib
+  - pyproj
+  - fiona
+  - pip
