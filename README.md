@@ -2,7 +2,7 @@
 
 Phenology analysis tool for vegetation index (VI) time-series data. Reads CF-1.8 compliant
 NetCDF files, extracts and smooths temporal profiles, computes phenological metrics, and
-generates publication-ready plots.
+generates annual and time series png and html plots.
 
 Designed to work natively with output from [HLS_VI_Pipeline](https://github.com/stephenconklin/HLS_VI_Pipeline),
 but accepts any CF-1.8 NetCDF with `time`, `y`, `x` dimensions and a VI data variable.
