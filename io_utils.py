@@ -94,6 +94,100 @@ def save_parquet(raw: dict, smoothed: Optional[dict], config: PhenologyConfig):
         )
 
 
+def save_observations_csv(
+    raw: dict, smoothed: Optional[dict], config: PhenologyConfig
+) -> dict:
+    """Save per-region observations-only CSV and return data for combined CSV assembly.
+
+    Only rows where vi_count > 0 are written — actual HLS acquisition dates only.
+    No gap-filled, interpolated, or extrapolated rows are included.
+
+    Columns written:
+        date       datetime      — observation date
+        vi_raw     float32       — spatially averaged VI over ROI
+        vi_count   int32         — number of valid pixels contributing to the mean
+        vi_std     float32       — spatial standard deviation of VI over ROI
+        vi_smooth  float32       — smooth curve value at this observation date
+                                   (omitted when smoothed is None)
+
+    Output path: config.output_dir_for(region_label) / '{vi}_{region_label}_observations.csv'
+
+    Args:
+        raw:      dict from extract_timeseries() — Layers 0+1
+        smoothed: dict from smooth_timeseries() — Layer 2, or None
+        config:   PhenologyConfig
+
+    Returns:
+        dict keyed by (vi, shapefile_stem) → list[pd.DataFrame] for use by
+        write_combined_observations_csv(). Each DataFrame has a leading 'region' column.
+    """
+    accumulated: dict = {}
+
+    for (vi, region_label), df in raw.items():
+        obs = df[df['vi_count'] > 0].copy()
+        cols = ['date', 'vi_raw', 'vi_count', 'vi_std']
+
+        if smoothed is not None and (vi, region_label) in smoothed:
+            s_df = smoothed[(vi, region_label)]
+            obs = obs.merge(s_df[['date', 'vi_smooth']], on='date', how='left')
+            cols.append('vi_smooth')
+
+        out_dir = config.output_dir_for(region_label)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"{vi}_{region_label}_observations.csv"
+        obs[cols].to_csv(out_path, index=False, date_format='%Y-%m-%d')
+        logger.info(
+            "Saved observations CSV: %s  (%d rows)", out_path, len(obs)
+        )
+
+        # Accumulate for combined CSV — add region identifier column.
+        row_df = obs[cols].copy()
+        row_df.insert(0, 'region', region_label)
+        shapefile_stem = config._region_shapefile_map.get(region_label, region_label)
+        accumulated.setdefault((vi, shapefile_stem), []).append(row_df)
+
+    return accumulated
+
+
+def write_combined_observations_csv(all_obs: dict, config: PhenologyConfig) -> None:
+    """Write a combined observations CSV per shapefile, stacking all regions.
+
+    Produced only when a shapefile contributes more than one region (i.e. when
+    --shapefile-field is active and yields multiple distinct field values).
+    Skipped for full_extent runs and dissolved single-region shapefiles.
+
+    Columns: region, date, vi_raw, vi_count, vi_std[, vi_smooth]
+    Rows sorted by (region, date).
+
+    Output path: config.output_dir / {shapefile_stem} / '{VI}_{shapefile_stem}_timeseries.csv'
+
+    Args:
+        all_obs: dict returned by (and accumulated across calls to) save_observations_csv()
+        config:  PhenologyConfig
+    """
+    if not config.shapefiles:
+        return
+
+    for (vi, shapefile_stem), dfs in all_obs.items():
+        if len(dfs) <= 1:
+            # Single region — combined CSV would duplicate the per-region file.
+            continue
+
+        combined = (
+            pd.concat(dfs, ignore_index=True)
+            .sort_values(['region', 'date'])
+            .reset_index(drop=True)
+        )
+        out_dir = config.output_dir / shapefile_stem
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"{vi}_{shapefile_stem}_timeseries.csv"
+        combined.to_csv(out_path, index=False, date_format='%Y-%m-%d')
+        logger.info(
+            "Saved combined observations CSV (%d region(s), %d rows): %s",
+            combined['region'].nunique(), len(combined), out_path,
+        )
+
+
 def load_parquet(parquet_path: Path) -> pd.DataFrame:
     """Load a previously saved phenology Parquet file.
 

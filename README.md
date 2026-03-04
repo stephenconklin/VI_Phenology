@@ -319,19 +319,25 @@ Outputs are organized into per-region subdirectories when shapefiles are provide
 
 ```
 outputs/                                         ← --output-dir
-├── Cape_Fynbos/                                 ← one subdirectory per region
-│   ├── NDVI_Cape_Fynbos_timeseries.parquet
-│   ├── NDVI_Cape_Fynbos_metrics.csv
-│   ├── NDVI_Cape_Fynbos_timeseries.png
-│   ├── NDVI_Cape_Fynbos_timeseries.html
-│   ├── NDVI_Cape_Fynbos_annual.png
-│   ├── NDVI_Cape_Fynbos_annual.html
-│   ├── NDVI_Cape_Fynbos_anomaly.png
-│   └── Cape_Fynbos_multi_vi.png
-├── Succulent_Karoo/
-│   └── ...
-└── NDVI_biomes_metrics.csv                      ← combined metrics (one per shapefile × VI)
+└── biomes/                                      ← shapefile stem folder
+    ├── Cape_Fynbos/                             ← one subfolder per field value
+    │   ├── NDVI_Cape_Fynbos_timeseries.parquet
+    │   ├── NDVI_Cape_Fynbos_observations.csv
+    │   ├── NDVI_Cape_Fynbos_metrics.csv
+    │   ├── NDVI_Cape_Fynbos_timeseries.png
+    │   ├── NDVI_Cape_Fynbos_timeseries.html
+    │   ├── NDVI_Cape_Fynbos_annual.png
+    │   ├── NDVI_Cape_Fynbos_annual.html
+    │   ├── NDVI_Cape_Fynbos_anomaly.png
+    │   └── Cape_Fynbos_multi_vi.png
+    ├── Succulent_Karoo/
+    │   └── ...
+    ├── NDVI_biomes_timeseries.csv               ← all regions stacked (field-split runs only)
+    └── NDVI_biomes_metrics.csv                  ← combined metrics (field-split runs only)
 ```
+
+When a shapefile is dissolved (no `--shapefile-field`), the outputs go into
+`outputs/{shapefile_stem}/` with no further nesting.
 
 When no shapefile is provided (full-extent mode), all outputs go directly into `--output-dir`
 and the region label is `full_extent`.
@@ -340,11 +346,13 @@ and the region label is `full_extent`.
 
 | File | Description |
 |------|-------------|
-| `{VI}_{region}_timeseries.parquet` | Daily time series: raw + smoothed VI columns, provenance flags |
+| `{VI}_{region}_observations.csv` | **Actual HLS observations only** — date, vi_raw, vi_count, vi_std, vi_smooth (at obs dates). No gap-filled rows. |
+| `{VI}_{shapefile_stem}_timeseries.csv` | All regions stacked with `region` column — same columns as above. Written to shapefile root folder when `--shapefile-field` yields multiple regions. |
+| `{VI}_{region}_timeseries.parquet` | Complete daily time series (all rows including gap days): raw + smoothed VI columns, provenance flags |
 | `{VI}_{region}_metrics.csv` | Phenological metrics per year for this region |
 | `{VI}_{shapefile_stem}_metrics.csv` | Combined metrics for all regions in a shapefile (when `--shapefile-field` is set) |
 | `{VI}_{region}_timeseries.png/html` | Full temporal range: smooth curve + observation scatter + ±1 std band |
-| `{VI}_{region}_annual.png/html` | VI vs day-of-year, one line per year |
+| `{VI}_{region}_annual.png/html` | VI vs month, one line per year + multi-year mean |
 | `{VI}_{region}_anomaly.png/html` | Per-year deviation from multi-year mean (requires ≥ 2 calendar years) |
 | `{region}_multi_vi.png/html` | Side-by-side NDVI / EVI2 / NIRv comparison (requires > 1 VI) |
 

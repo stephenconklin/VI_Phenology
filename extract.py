@@ -541,6 +541,8 @@ def enumerate_regions(config: PhenologyConfig) -> list:
             shapefile.name, len(region_pairs),
             f" (split by field '{field}')" if field else " (dissolved)",
         )
+        for region_label, _ in region_pairs:
+            config.register_region(region_label, shapefile.stem)
         regions.extend(region_pairs)
 
     return regions

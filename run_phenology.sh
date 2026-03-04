@@ -8,7 +8,7 @@ NETCDF_DIR="/Volumes/ConklinGeospatialData/Data/BioSCape_SA/2_Interim/2_NetCDF"
 VI="NDVI"                        # space-separated; choices: NDVI EVI2 NIRv
 # 
 # ── Output ─────────────────────────────────────────────────────────────────────
-OUTPUT_DIR="/Volumes/ConklinGeospatialData/Data/BioSCape_SA_Phenology"
+OUTPUT_DIR="/Volumes/ConklinGeospatialData/Data/BioSCape_SA_Phenology_2"
 # 
 # ── Shapefile(s) ──────────────────────────────────────────────────────────────
 # Accepts any GeoPandas-readable vector format: .shp, .gpkg, .geojson, .kml, .fgb, .gdb, etc.

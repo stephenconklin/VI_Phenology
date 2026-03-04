@@ -57,6 +57,10 @@ class PhenologyConfig:
 
     def __post_init__(self):
         """Validate configuration values at construction time."""
+        # Internal registry: region_label → shapefile stem. Populated by enumerate_regions
+        # so that output_dir_for can build the correct nested output path.
+        self._region_shapefile_map: dict = {}
+
         errors = []
 
         if not (0.0 < self.sos_threshold < 1.0):
@@ -131,6 +135,14 @@ class PhenologyConfig:
                 + "\n".join(f"  - {e}" for e in errors)
             )
 
+    def register_region(self, region_label: str, shapefile_stem: str) -> None:
+        """Register the source shapefile stem for a region label.
+
+        Called by enumerate_regions() in extract.py for each (region_label, roi_gdf)
+        pair so that output_dir_for() can build the correct nested output path.
+        """
+        self._region_shapefile_map[region_label] = shapefile_stem
+
     def field_for_shapefile(self, index: int) -> Optional[str]:
         """Return the split field name for the shapefile at position index.
 
@@ -156,10 +168,16 @@ class PhenologyConfig:
     def output_dir_for(self, region_label: str) -> Path:
         """Return the output directory for a given region.
 
-        When shapefiles are provided, outputs are organized into subdirectories
-        named after each shapefile's stem (region_label). When no shapefiles are
-        used (full_extent), all outputs go directly into output_dir.
+        Directory structure:
+          No shapefile          → output_dir/
+          Shapefile, dissolved  → output_dir/{shapefile_stem}/
+          Shapefile + field     → output_dir/{shapefile_stem}/{field_value}/
         """
-        if self.shapefiles:
-            return self.output_dir / region_label
-        return self.output_dir
+        if not self.shapefiles:
+            return self.output_dir
+        shapefile_stem = self._region_shapefile_map.get(region_label, region_label)
+        if shapefile_stem != region_label:
+            # Field-split: nest the field value under its source shapefile folder.
+            return self.output_dir / shapefile_stem / region_label
+        # Dissolved: the region_label IS the shapefile stem.
+        return self.output_dir / region_label

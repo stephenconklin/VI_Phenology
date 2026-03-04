@@ -264,16 +264,23 @@ Tool can accept any NetCDF matching the dimension/CRS structure above.
 
 | Output | Pattern | Location |
 |--------|---------|----------|
+| Observations CSV | `{VI}_{region_label}_observations.csv` | per-region subdirectory |
+| Combined observations CSV | `{VI}_{shapefile_stem}_timeseries.csv` | shapefile root folder |
 | Parquet time series | `{VI}_{region_label}_timeseries.parquet` | per-region subdirectory |
 | Per-region metrics CSV | `{VI}_{region_label}_metrics.csv` | per-region subdirectory |
-| Combined shapefile metrics CSV | `{VI}_{shapefile_stem}_metrics.csv` | `output_dir` root |
+| Combined shapefile metrics CSV | `{VI}_{shapefile_stem}_metrics.csv` | shapefile root folder |
 | Annual phenology plot | `{VI}_{region_label}_annual.{ext}` | per-region subdirectory |
 | Full time-series plot | `{VI}_{region_label}_timeseries.{ext}` | per-region subdirectory |
 | Anomaly plot | `{VI}_{region_label}_anomaly.{ext}` | per-region subdirectory |
 | Multi-VI comparison | `{region_label}_multi_vi.{ext}` | per-region subdirectory |
 
-Combined metrics CSV is only written when `--shapefile-field` is set and the shapefile was
-not dissolved (i.e., the field value is not `'none'`).
+Observations CSV: always written per-region. Contains only `vi_count > 0` rows (actual HLS
+acquisitions). No gap-filled or interpolated rows. Columns: `date, vi_raw, vi_count, vi_std`
+plus `vi_smooth` at observation dates when smoothing is applied.
+
+Combined observations CSV and combined metrics CSV: written to the shapefile root folder when
+`--shapefile-field` yields multiple regions for a shapefile. Skipped for dissolved shapefiles
+(single region) and full-extent runs.
 
 `region_label` is determined as follows:
 
