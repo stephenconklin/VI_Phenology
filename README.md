@@ -444,11 +444,9 @@ python vi_phenology.py --log-level DEBUG ...     # full diagnostics
 ## Authors
 
 **Stephen Conklin**, Geospatial Analyst — Pipeline architecture, orchestration, and all original code.
-[https://github.com/stephenconklin](https://github.com/stephenconklin)
+[https://github.com/stephenconklin](https://github.com/stephenconklin) 
 
-### AI Assistance
-
-This tool was developed with the assistance of Anthropic Claude / Claude Code. These tools assisted
+**AI Assistance:** This tool was developed with the assistance of Anthropic Claude / Claude Code. These tools assisted
 with code generation and refinement under the direction and review of the author.
 
 ---
