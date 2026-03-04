@@ -332,7 +332,8 @@ outputs/                                         ← --output-dir
     │   └── Cape_Fynbos_multi_vi.png
     ├── Succulent_Karoo/
     │   └── ...
-    ├── NDVI_biomes_timeseries.csv               ← all regions stacked (field-split runs only)
+    ├── NDVI_biomes_timeseries.parquet           ← all regions stacked, full daily series (field-split runs only)
+    ├── NDVI_biomes_timeseries.csv               ← all regions stacked, observations only (field-split runs only)
     └── NDVI_biomes_metrics.csv                  ← combined metrics (field-split runs only)
 ```
 
@@ -346,9 +347,10 @@ and the region label is `full_extent`.
 
 | File | Description |
 |------|-------------|
-| `{VI}_{region}_observations.csv` | **Actual HLS observations only** — date, vi_raw, vi_count, vi_std, vi_smooth (at obs dates). No gap-filled rows. |
-| `{VI}_{shapefile_stem}_timeseries.csv` | All regions stacked with `region` column — same columns as above. Written to shapefile root folder when `--shapefile-field` yields multiple regions. |
 | `{VI}_{region}_timeseries.parquet` | Complete daily time series (all rows including gap days): raw + smoothed VI columns, provenance flags |
+| `{VI}_{shapefile_stem}_timeseries.parquet` | All regions stacked with `region` column — same full daily series as above. Written to shapefile root folder when `--shapefile-field` yields multiple regions. |
+| `{VI}_{region}_observations.csv` | **Actual HLS observations only** — date, vi_raw, vi_count, vi_std, vi_smooth (at obs dates). No gap-filled rows. |
+| `{VI}_{shapefile_stem}_timeseries.csv` | All regions stacked with `region` column — same columns as observations CSV above. Written to shapefile root folder when `--shapefile-field` yields multiple regions. |
 | `{VI}_{region}_metrics.csv` | Phenological metrics per year for this region |
 | `{VI}_{shapefile_stem}_metrics.csv` | Combined metrics for all regions in a shapefile (when `--shapefile-field` is set) |
 | `{VI}_{region}_timeseries.png/html` | Full temporal range: smooth curve + observation scatter + ±1 std band |
