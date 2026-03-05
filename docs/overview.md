@@ -1,0 +1,128 @@
+# VI Phenology Guide
+
+[![Python](https://img.shields.io/badge/python-3.10--3.12-blue.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey.svg)]()
+
+Phenology analysis tool for vegetation index (VI) time-series data. Reads CF-1.8 compliant
+NetCDF files, extracts and smooths temporal profiles, computes phenological metrics, and
+generates annual and time-series plots (PNG static + interactive HTML).
+
+Designed to work natively with output from [HLS_VI_Pipeline](https://github.com/stephenconklin/HLS_VI_Pipeline),
+but accepts any CF-1.8 NetCDF with `time`, `y`, `x` dimensions and a VI data variable.
+
+---
+
+## Supported Vegetation Indices
+
+| VI | Name |
+|----|------|
+| NDVI | Normalized Difference Vegetation Index |
+| EVI2 | Two-band Enhanced Vegetation Index |
+| NIRv | Near-Infrared Reflectance of Vegetation |
+
+Multiple VIs can be processed in a single run (`--vi NDVI EVI2 NIRv`).
+
+---
+
+## Features
+
+- Layered processing pipeline: raw observations → daily time axis → smoothed gap-filled series → phenological metrics
+- Multiple smoothing methods: Savitzky-Golay, LOESS, linear interpolation, harmonic fit
+- Spatial subsetting via any GeoPandas-readable vector format (`.shp`, `.gpkg`, `.geojson`, etc.)
+- Per-feature splitting: produce one independent time series per attribute value in a shapefile
+- Multiple shapefiles in a single run, each with its own optional field splitting
+- Phenological metrics: SOS, POS, EOS, LOS, IVI, greening rate, senescence rate
+- Combined per-shapefile metrics CSV when splitting by attribute field
+- Output formats: Parquet (time series), CSV (metrics and observations), PNG static + interactive HTML plots
+- Date range filtering applied at the NetCDF level before any aggregation
+- Valid-range filtering consistent with HLS_VI_Pipeline configuration
+- Parallel tile extraction via `concurrent.futures.ProcessPoolExecutor`
+
+---
+
+## Performance
+
+Tile-level extraction is parallelized using `concurrent.futures.ProcessPoolExecutor`. Each
+NetCDF tile is processed in a dedicated worker process; the main process pools pixel statistics
+across tiles to compute the correct weighted mean and standard deviation.
+
+Control the worker count with `--workers N` (default: 8). Set to 1 for fully sequential
+processing — useful for debugging or on memory-constrained machines.
+
+| Workers | 23 tiles | Approx. time |
+|---------|----------|--------------|
+| 1 (sequential) | — | ~10 min |
+| 4 | — | ~2.5 min |
+| 8 | — | ~1.5 min |
+
+---
+
+## Setup
+
+### 1. Clone the Repository
+
+```bash
+git clone https://github.com/stephenconklin/VI_Phenology.git
+cd VI_Phenology
+```
+
+### 2. Create the Conda Environment
+
+```bash
+conda env create -f environment.yml
+conda activate vi_phenology
+```
+
+---
+
+## Quickstart
+
+### Recommended — `run_phenology.sh`
+
+Edit the configuration variables at the top of the script to match your paths and options, then:
+
+```bash
+./run_phenology.sh
+```
+
+All parameters are documented with inline comments inside the script.
+
+### Direct CLI
+
+```bash
+python vi_phenology.py \
+  --netcdf-dir /path/to/netcdfs \
+  --vi NDVI EVI2 \
+  --shapefile /path/to/roi.gpkg \
+  --output-dir ./outputs \
+  --smooth-method savgol \
+  --smooth-window 15 \
+  --smooth-polyorder 3 \
+  --plot-style combined \
+  --plot-format png html \
+  --metrics \
+  --workers 8
+```
+
+```bash
+python vi_phenology.py --help
+```
+
+For the full argument reference, see the [CLI Reference](cli_reference.md).
+
+---
+
+## Authors
+
+**Stephen Conklin**, Geospatial Analyst — Pipeline architecture, orchestration, and all original code.
+[https://github.com/stephenconklin](https://github.com/stephenconklin)
+
+**AI Assistance:** This tool was developed with the assistance of Anthropic Claude / Claude Code. These tools assisted
+with code generation and refinement under the direction and review of the author.
+
+---
+
+## License
+
+MIT

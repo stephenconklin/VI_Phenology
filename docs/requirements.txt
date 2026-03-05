@@ -1,0 +1,6 @@
+# Documentation build dependencies (used by Read the Docs)
+# The runtime pipeline environment is defined in environment.yml
+
+sphinx>=7,<9
+myst-parser>=3,<5          # Markdown support in Sphinx
+sphinx-rtd-theme>=2,<3     # Read the Docs theme
