@@ -72,7 +72,7 @@ is applied at the NetCDF level before any spatial aggregation, keeping memory us
 large multi-year datasets:
 
 ```bash
-python vi_phenology.py \
+python src/vi_phenology.py \
   --netcdf-dir /path/to/netcdfs \
   --vi NDVI \
   --output-dir ./outputs \
@@ -107,7 +107,7 @@ outputs/vi_phenology_20260303_153100.log
 To disable automatic log file creation:
 
 ```bash
-python vi_phenology.py --no-logfile ...
+python src/vi_phenology.py --no-logfile ...
 ```
 
 ### Verbosity Levels
@@ -119,6 +119,6 @@ python vi_phenology.py --no-logfile ...
 | `DEBUG` | Adds clip geometry details, bin sizes, S-G window calculations, per-reindex statistics |
 
 ```bash
-python vi_phenology.py --log-level WARNING ...   # quiet
-python vi_phenology.py --log-level DEBUG ...     # full diagnostics
+python src/vi_phenology.py --log-level WARNING ...   # quiet
+python src/vi_phenology.py --log-level DEBUG ...     # full diagnostics
 ```

@@ -16,7 +16,7 @@ conda activate vi_phenology
 ## Running the Tool
 
 ```bash
-python vi_phenology.py \
+python src/vi_phenology.py \
   --netcdf-dir /path/to/netcdfs \
   --vi NDVI EVI2 \
   --shapefile roi.gpkg \
@@ -35,7 +35,7 @@ python vi_phenology.py \
 ```
 
 The recommended way to run is via `run_phenology.sh` — edit its variables and run
-`./run_phenology.sh`. Use `python vi_phenology.py --help` for the full argument reference.
+`./run_phenology.sh`. Use `python src/vi_phenology.py --help` for the full argument reference.
 
 ## Implementation Status
 

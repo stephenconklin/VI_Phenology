@@ -20,7 +20,7 @@ Omit `--shapefile` entirely to process the full spatial extent of the NetCDF fil
 Pass multiple paths to produce an independent time series and output set per shapefile:
 
 ```bash
-python vi_phenology.py \
+python src/vi_phenology.py \
   --shapefile /path/to/region1.gpkg /path/to/region2.geojson \
   ...
 ```
@@ -33,7 +33,7 @@ To produce one independent time series per feature value in a shapefile, provide
 of an attribute column:
 
 ```bash
-python vi_phenology.py \
+python src/vi_phenology.py \
   --shapefile biomes.gpkg \
   --shapefile-field Name \
   ...
@@ -55,13 +55,13 @@ order. Use `none` to dissolve a specific shapefile rather than splitting it:
 
 ```bash
 # Split first shapefile by 'box_nr', dissolve the second
-python vi_phenology.py \
+python src/vi_phenology.py \
   --shapefile flights.shp tiles.geojson \
   --shapefile-field box_nr none \
   ...
 
 # Split both shapefiles by their respective fields
-python vi_phenology.py \
+python src/vi_phenology.py \
   --shapefile flights.shp tiles.geojson \
   --shapefile-field box_nr tile_id \
   ...

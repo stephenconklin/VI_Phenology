@@ -107,7 +107,7 @@ if [ "${NO_LOGFILE:-false}" = true ]; then
     NO_LOGFILE_FLAG="--no-logfile"
 fi
 
-python vi_phenology.py \
+python src/vi_phenology.py \
     --netcdf-dir   "$NETCDF_DIR" \
     --vi           $VI \
     $SHAPEFILE_FLAG \

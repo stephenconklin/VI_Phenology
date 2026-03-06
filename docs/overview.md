@@ -91,7 +91,7 @@ All parameters are documented with inline comments inside the script.
 ### Direct CLI
 
 ```bash
-python vi_phenology.py \
+python src/vi_phenology.py \
   --netcdf-dir /path/to/netcdfs \
   --vi NDVI EVI2 \
   --shapefile /path/to/roi.gpkg \
@@ -106,7 +106,7 @@ python vi_phenology.py \
 ```
 
 ```bash
-python vi_phenology.py --help
+python src/vi_phenology.py --help
 ```
 
 For the full argument reference, see the [CLI Reference](cli_reference.md).

@@ -1,6 +1,6 @@
 # CLI Reference
 
-All parameters are available via `python vi_phenology.py --help`.
+All parameters are available via `python src/vi_phenology.py --help`.
 
 The recommended way to run the tool is via `run_phenology.sh` — edit its variables and run
 `./run_phenology.sh`. All parameters are documented with inline comments inside the script.
