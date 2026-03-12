@@ -4,12 +4,24 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey.svg)]()
 
-Phenology analysis tool for vegetation index (VI) time-series data. Reads CF-1.8 compliant
-NetCDF files, extracts and smooths temporal profiles, computes phenological metrics, and
-generates annual and time-series plots (PNG static + interactive HTML).
+A dual-pipeline vegetation index analysis toolkit. Reads CF-1.8 compliant NetCDF files
+and delivers either aggregated phenology time series or per-pixel CF-1.8 datacubes
+clipped to polygon regions.
 
 Designed to work natively with output from [HLS_VI_Pipeline](https://github.com/stephenconklin/HLS_VI_Pipeline),
 but accepts any CF-1.8 NetCDF with `time`, `y`, `x` dimensions and a VI data variable.
+
+---
+
+## Two Pipelines
+
+| Pipeline | Purpose | Select in `run_phenology.sh` |
+|---|---|---|
+| **phenology** | ROI-mean time series, smoothing, phenological metrics, plots | `PIPELINE="phenology"` (default) |
+| **netcdf_datacube** | Per-pixel CF-1.8 datacubes clipped to polygon regions | `PIPELINE="netcdf_datacube"` |
+
+Both pipelines share the same input configuration: `NETCDF_DIR`, `VI`, `SHAPEFILE`,
+`SHAPEFILE_FIELD`, `VALID_RANGE_*`, `WORKERS`, `START_DATE`, `END_DATE`.
 
 ---
 
@@ -27,25 +39,37 @@ Multiple VIs can be processed in a single run (`--vi NDVI EVI2 NIRv`).
 
 ## Features
 
-- Layered processing pipeline: raw observations → daily time axis → smoothed gap-filled series → phenological metrics
+### Phenology Pipeline
+- Layered processing: raw observations → daily time axis → smoothed gap-filled series → phenological metrics
 - Multiple smoothing methods: Savitzky-Golay, LOESS, linear interpolation, harmonic fit
-- Spatial subsetting via any GeoPandas-readable vector format (`.shp`, `.gpkg`, `.geojson`, etc.)
-- Per-feature splitting: produce one independent time series per attribute value in a shapefile
-- Multiple shapefiles in a single run, each with its own optional field splitting
 - Phenological metrics: SOS, POS, EOS, LOS, IVI, greening rate, senescence rate
-- Combined per-shapefile metrics CSV when splitting by attribute field
-- Output formats: Parquet (time series), CSV (metrics and observations), PNG static + interactive HTML plots
+- Annual DOY overlay plot, full time-series plot, anomaly plot, multi-VI comparison panel
+- Granular output toggles — disable any combination of outputs in `run_phenology.sh`
+- Output formats: Parquet (time series), CSV (metrics and observations), PNG + interactive HTML plots
+- Combined per-shapefile Parquet, observations CSV, and metrics CSV when splitting by attribute field
+
+### netCDF Datacube Pipeline
+- Per-pixel CF-1.8 compliant datacubes clipped to polygon boundaries
+- Same-CRS multi-tile merging: pixel-perfect `combine_first` mosaic — no resampling
+- Cross-CRS multi-tile merging: bilinear reprojection of minority tiles to dominant CRS before merge
+- Configurable per-tile or merged output via `MERGE_SAME_CRS` / `MERGE_CROSS_CRS`
+- Full CF-1.8 metadata: `Conventions`, `history`, `tiles`, `region`, `vi`, `target_crs`, `resampling_method`
+
+### Shared Features
+- Spatial subsetting via any GeoPandas-readable vector format (`.shp`, `.gpkg`, `.geojson`, etc.)
+- Per-feature splitting: one independent output per attribute value in a shapefile
+- Multiple shapefiles in a single run, each with its own optional field splitting
 - Date range filtering applied at the NetCDF level before any aggregation
 - Valid-range filtering consistent with HLS_VI_Pipeline configuration
 - Parallel tile extraction via `concurrent.futures.ProcessPoolExecutor`
+- Automatic timestamped log file written to `--output-dir`
 
 ---
 
 ## Performance
 
 Tile-level extraction is parallelized using `concurrent.futures.ProcessPoolExecutor`. Each
-NetCDF tile is processed in a dedicated worker process; the main process pools pixel statistics
-across tiles to compute the correct weighted mean and standard deviation.
+NetCDF tile is processed in a dedicated worker process.
 
 Control the worker count with `--workers N` (default: 8). Set to 1 for fully sequential
 processing — useful for debugging or on memory-constrained machines.
@@ -80,7 +104,8 @@ conda activate vi_phenology
 
 ### Recommended — `run_phenology.sh`
 
-Edit the configuration variables at the top of the script to match your paths and options, then:
+Edit the configuration variables at the top of the script to match your paths, select
+your pipeline (`PIPELINE="phenology"` or `PIPELINE="netcdf_datacube"`), then:
 
 ```bash
 ./run_phenology.sh
@@ -88,7 +113,7 @@ Edit the configuration variables at the top of the script to match your paths an
 
 All parameters are documented with inline comments inside the script.
 
-### Direct CLI
+### Direct CLI — Phenology Pipeline
 
 ```bash
 python src/vi_phenology.py \
@@ -110,6 +135,24 @@ python src/vi_phenology.py --help
 ```
 
 For the full argument reference, see the [CLI Reference](cli_reference.md).
+
+### Direct CLI — netCDF Datacube Pipeline
+
+```bash
+python src/netcdf_datacube_extract.py \
+  --netcdf-dir /path/to/netcdfs \
+  --vi NDVI EVI2 \
+  --shapefile /path/to/roi.gpkg \
+  --shapefile-field Name \
+  --output-dir ./outputs \
+  --workers 8
+```
+
+```bash
+python src/netcdf_datacube_extract.py --help
+```
+
+For full details on the datacube pipeline, see [netCDF Datacube Pipeline](datacube.md).
 
 ---
 

@@ -21,7 +21,6 @@
 import argparse
 import logging
 import sys
-from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -36,7 +35,11 @@ from extract import (
 from smooth import smooth_timeseries
 from metrics import compute_metrics, write_combined_metrics
 from plot import generate_plots
-from io_utils import save_parquet, save_observations_csv, write_combined_observations_csv, write_combined_parquet
+from io_utils import (
+    save_parquet, save_observations_csv,
+    write_combined_observations_csv, write_combined_parquet,
+    parse_valid_range, setup_log_file,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -123,18 +126,7 @@ def parse_args():
         ),
     )
 
-    # --- Spatial mode ---
-    parser.add_argument(
-        "--mode", default="roi_mean",
-        choices=["roi_mean", "per_pixel"],
-        help=(
-            "Spatial aggregation mode. "
-            "'roi_mean': single time series per shapefile region. "
-            "'per_pixel': preserve spatial dimensions within the ROI."
-        ),
-    )
-
-    # --- Plotting ---
+    # --- Plotting style/format ---
     parser.add_argument(
         "--plot-style", default="combined",
         choices=["raw", "smooth", "combined"],
@@ -148,6 +140,36 @@ def parse_args():
         "--plot-format", nargs="+", default=["png"],
         choices=["png", "html"],
         help="Output format(s) for plots",
+    )
+
+    # --- Output toggles ---
+    parser.add_argument(
+        "--no-parquet", action="store_true",
+        help="Skip writing per-region Parquet time-series files",
+    )
+    parser.add_argument(
+        "--no-observations-csv", action="store_true",
+        help="Skip writing per-region observations-only CSV files",
+    )
+    parser.add_argument(
+        "--no-combined-outputs", action="store_true",
+        help="Skip writing combined shapefile Parquet and observations CSV files",
+    )
+    parser.add_argument(
+        "--no-plot-annual", action="store_true",
+        help="Skip the annual DOY overlay plot",
+    )
+    parser.add_argument(
+        "--no-plot-timeseries", action="store_true",
+        help="Skip the full calendar time-series plot",
+    )
+    parser.add_argument(
+        "--no-plot-anomaly", action="store_true",
+        help="Skip the anomaly (departure from multi-year mean) plot",
+    )
+    parser.add_argument(
+        "--no-plot-multi-vi", action="store_true",
+        help="Skip the multi-VI comparison plot",
     )
 
     # --- Parallelization ---
@@ -192,19 +214,6 @@ def parse_args():
     return parser.parse_args()
 
 
-def _parse_valid_range(raw: str, vi: str) -> tuple:
-    """Parse 'min,max' string to (float, float), with a helpful error message."""
-    try:
-        parts = raw.split(",")
-        return float(parts[0]), float(parts[1])
-    except (ValueError, IndexError):
-        logger.error(
-            "Could not parse --valid-range-%s='%s'. Expected format: 'min,max' e.g. '-1,1'",
-            vi.lower(), raw,
-        )
-        sys.exit(1)
-
-
 def main():
     args = parse_args()
 
@@ -224,15 +233,10 @@ def main():
         )
         sys.exit(1)
 
-    # per_pixel mode is not yet implemented.
-    if args.mode == "per_pixel":
-        logger.error("--mode per_pixel is not yet implemented. Use --mode roi_mean instead.")
-        sys.exit(1)
-
     valid_ranges = {
-        "NDVI": _parse_valid_range(args.valid_range_ndvi, "NDVI"),
-        "EVI2": _parse_valid_range(args.valid_range_evi2, "EVI2"),
-        "NIRv": _parse_valid_range(args.valid_range_nirv, "NIRv"),
+        "NDVI": parse_valid_range(args.valid_range_ndvi, "NDVI"),
+        "EVI2": parse_valid_range(args.valid_range_evi2, "EVI2"),
+        "NIRv": parse_valid_range(args.valid_range_nirv, "NIRv"),
     }
 
     config = PhenologyConfig(
@@ -247,29 +251,26 @@ def main():
         smooth_polyorder=args.smooth_polyorder,
         sos_threshold=args.sos_threshold,
         year_start_doy=args.year_start_doy,
-        mode=args.mode,
         plot_style=args.plot_style,
         plot_formats=args.plot_format,
         compute_metrics=args.metrics,
         start_date=args.start_date,
         end_date=args.end_date,
         n_workers=args.workers,
+        save_parquet=not args.no_parquet,
+        save_observations_csv=not args.no_observations_csv,
+        save_combined_outputs=not args.no_combined_outputs,
+        plot_annual=not args.no_plot_annual,
+        plot_timeseries=not args.no_plot_timeseries,
+        plot_anomaly=not args.no_plot_anomaly,
+        plot_multi_vi=not args.no_plot_multi_vi,
     )
 
     config.output_dir.mkdir(parents=True, exist_ok=True)
 
     # Attach a timestamped log file to the root logger (unless --no-logfile).
     if not args.no_logfile:
-        run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_path = config.output_dir / f"vi_phenology_{run_ts}.log"
-        file_handler = logging.FileHandler(log_path, encoding="utf-8")
-        file_handler.setLevel(getattr(logging, args.log_level))
-        file_handler.setFormatter(logging.Formatter(
-            "%(asctime)s  %(levelname)-8s  [%(name)s]  %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        ))
-        logging.getLogger("").addHandler(file_handler)
-        logger.info("Log file: %s", log_path)
+        setup_log_file(config.output_dir, "vi_phenology", args.log_level)
 
     logger.info("VI Phenology pipeline starting")
     logger.info("  NetCDF dir    : %s", config.netcdf_dir)
@@ -359,13 +360,17 @@ def main():
             region_smoothed = smooth_timeseries(region_raw, config)
 
         # Save Parquet and observations CSV for this region.
-        logger.info("[Output] Saving Parquet and CSV for region '%s' ...", region_label)
-        region_parquet = save_parquet(region_raw, region_smoothed, config)
-        for key, dfs in region_parquet.items():
-            all_parquet.setdefault(key, []).extend(dfs)
-        region_obs = save_observations_csv(region_raw, region_smoothed, config)
-        for key, dfs in region_obs.items():
-            all_obs.setdefault(key, []).extend(dfs)
+        if config.save_parquet:
+            logger.info("[Output] Saving Parquet for region '%s' ...", region_label)
+            region_parquet = save_parquet(region_raw, region_smoothed, config)
+            for key, dfs in region_parquet.items():
+                all_parquet.setdefault(key, []).extend(dfs)
+
+        if config.save_observations_csv:
+            logger.info("[Output] Saving observations CSV for region '%s' ...", region_label)
+            region_obs = save_observations_csv(region_raw, region_smoothed, config)
+            for key, dfs in region_obs.items():
+                all_obs.setdefault(key, []).extend(dfs)
 
         # Layer 3: phenological metrics for this region.
         if config.compute_metrics:
@@ -374,12 +379,17 @@ def main():
             if not region_metrics_df.empty:
                 all_metrics.append(region_metrics_df)
 
-        # Plots for this region.
-        logger.info(
-            "[Plots] Generating %s plots for region '%s' ...",
-            ", ".join(config.plot_formats), region_label,
-        )
-        generate_plots(region_raw, region_smoothed, config)
+        # Plots for this region — skipped entirely when all plot types are disabled.
+        _any_plots = any([
+            config.plot_annual, config.plot_timeseries,
+            config.plot_anomaly, config.plot_multi_vi,
+        ])
+        if _any_plots:
+            logger.info(
+                "[Plots] Generating %s plots for region '%s' ...",
+                ", ".join(config.plot_formats), region_label,
+            )
+            generate_plots(region_raw, region_smoothed, config)
 
         logger.info("══ Region '%s' complete ══", region_label)
         # region_raw and region_smoothed go out of scope here and are eligible for GC.
@@ -398,11 +408,11 @@ def main():
         all_metrics_df = pd.concat(all_metrics, ignore_index=True)
         write_combined_metrics(all_metrics_df, config)
 
-    # Combined shapefile Parquet (full daily series; written after all regions are complete).
-    write_combined_parquet(all_parquet, config)
-
-    # Combined shapefile observations CSV (written after all regions are complete).
-    write_combined_observations_csv(all_obs, config)
+    if config.save_combined_outputs:
+        # Combined shapefile Parquet (full daily series; written after all regions are complete).
+        write_combined_parquet(all_parquet, config)
+        # Combined shapefile observations CSV (written after all regions are complete).
+        write_combined_observations_csv(all_obs, config)
 
     logger.info("Done. All outputs written to: %s", config.output_dir)
 

@@ -524,17 +524,20 @@ def generate_plots(raw: dict, smoothed: dict, config: PhenologyConfig):
     for (vi, region_label) in sorted(all_keys):
         logger.info("Plotting %s / %s (formats: %s)", vi, region_label, config.plot_formats)
 
-        plot_timeseries(raw, smoothed, config, vi, region_label)
-        plot_annual_phenology(raw, smoothed, config, vi, region_label)
+        if config.plot_timeseries:
+            plot_timeseries(raw, smoothed, config, vi, region_label)
 
-        if smoothed is not None:
+        if config.plot_annual:
+            plot_annual_phenology(raw, smoothed, config, vi, region_label)
+
+        if config.plot_anomaly and smoothed is not None:
             df_smooth = smoothed.get((vi, region_label))
             if df_smooth is not None:
                 n_years = df_smooth['date'].dt.year.nunique()
                 if n_years >= 2:
                     plot_anomaly(smoothed, config, vi, region_label)
 
-    if len(config.vi_list) > 1:
+    if config.plot_multi_vi and len(config.vi_list) > 1:
         for region_label in sorted(regions):
             logger.info("Plotting multi-VI comparison for region '%s'", region_label)
             plot_multi_vi(raw, smoothed, config, region_label)
