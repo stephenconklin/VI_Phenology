@@ -13,7 +13,26 @@ conda env create -f environment.yml
 conda activate vi_phenology
 ```
 
+## Two Pipelines — Overview
+
+This repository contains two independent processing pipelines, selected via the `PIPELINE`
+variable in `run_phenology.sh`:
+
+| `PIPELINE` | Script | Purpose |
+|---|---|---|
+| `phenology` (default) | `src/vi_phenology.py` | ROI-mean time series, smoothing, metrics, plots |
+| `netcdf_datacube` | `src/netcdf_datacube_extract.py` | Per-pixel CF-1.8 datacubes clipped to polygon regions |
+
+Both pipelines share the same `--netcdf-dir`, `--vi`, `--shapefile`, `--shapefile-field`,
+`--valid-range-*`, `--workers`, `--start-date`, `--end-date`, and `--no-logfile` inputs.
+
 ## Running the Tool
+
+### Recommended — `run_phenology.sh`
+
+Edit the variables at the top and run `./run_phenology.sh`. Inline comments document every option.
+
+### Phenology pipeline (direct CLI)
 
 ```bash
 python src/vi_phenology.py \
@@ -34,26 +53,56 @@ python src/vi_phenology.py \
   --end-date   2024-12-31
 ```
 
-The recommended way to run is via `run_phenology.sh` — edit its variables and run
-`./run_phenology.sh`. Use `python src/vi_phenology.py --help` for the full argument reference.
+Use `python src/vi_phenology.py --help` for the full argument reference.
+
+### netCDF datacube pipeline (direct CLI)
+
+```bash
+python src/netcdf_datacube_extract.py \
+  --netcdf-dir /path/to/netcdfs \
+  --vi NDVI EVI2 \
+  --shapefile roi.gpkg \
+  --shapefile-field Name \
+  --valid-range-ndvi "-0.1,1.0" \
+  --output-dir ./outputs \
+  --workers 4 \
+  --start-date 2022-01-01 \
+  --end-date   2024-12-31
+```
+
+Use `python src/netcdf_datacube_extract.py --help` for the full argument reference.
 
 ## Implementation Status
 
 All modules are **fully implemented**. The end-to-end pipeline runs successfully across
 all layers (extraction → smoothing → metrics → plots). No stubs remain.
 
+`netcdf_datacube_extract.py` is a standalone module — it does not depend on
+`PhenologyConfig` or any other phenology-pipeline module.
+
 ## Project Purpose
 
-Standalone phenology analysis tool that reads CF-1.8 compliant vegetation index (VI)
-NetCDF time-series files (e.g., output from HLS_VI_Pipeline steps 01–03) and produces:
-- Aggregated time-series data (Parquet)
+### Phenology pipeline (`vi_phenology.py`)
+
+Reads CF-1.8 compliant VI NetCDF time-series files and produces per-region
+spatially aggregated time series:
+- ROI-mean aggregated time series (Parquet + observations CSV)
+- Smoothed gap-filled daily series
 - Phenological metrics tables (CSV)
 - Phenology plots (PNG static + HTML interactive)
 
-The tool is intentionally decoupled from HLS_VI_Pipeline — it accepts any CF-1.8 NetCDF
-with `time` (days since 1970-01-01), `y`, `x` dimensions and a VI data variable.
+### netCDF datacube pipeline (`netcdf_datacube_extract.py`)
 
-## Architecture: Layered Output Design
+Clips CF-1.8 VI NetCDF files to polygon boundaries and delivers per-pixel
+CF-1.8 compliant datacubes — preserving the full spatial dimension for
+downstream scientific analysis:
+- One merged datacube per region (default) or one file per tile
+- Same-CRS tiles: mosaiced without resampling (`combine_first`, first-wins for overlap zone)
+- Cross-CRS tiles: minority tiles bilinearly reprojected to the dominant CRS before merging
+- CF-1.8 global attributes: `Conventions`, `history`, `tiles`, `region`, `vi`,
+  `target_crs`, `resampling_method` (when reprojection occurs)
+
+## Architecture: Phenology Layered Output Design
 
 Processing is structured as four sequential layers:
 
@@ -70,27 +119,79 @@ Layer 3  Phenological metrics derived from Layer 2 smooth curve
 Layers 0+1 are always computed. Layer 2 is skipped when `--smooth-method none`.
 Layer 3 requires Layer 2 and `--metrics` flag.
 
+## Architecture: netCDF Datacube Two-Phase Model
+
+```
+Phase 1 (parallel workers)
+  For each tile:
+    Open NetCDF → clip to ROI → apply valid-range mask → write temp netCDF
+    (workers return only small status dicts — never large arrays across process boundary)
+   ↓
+Phase 2 (main process)
+  Detect CRS per tile (pyproj.CRS.to_epsg() for normalized comparison)
+  Group tiles by CRS
+  Apply merge strategy:
+    1 tile           → single file, native CRS
+    N tiles same CRS, merge_same_crs=True  → combine_first mosaic, no resampling
+    N tiles mixed CRS, merge_cross_crs=True → reproject minority tiles (bilinear) + combine_first
+    otherwise        → one file per tile, native CRS
+  Write final datacube(s)
+   ↓
+Cleanup (try/finally — runs even if Phase 2 raises)
+  Delete {output_dir}/{region_label}/_tmp/
+```
+
+### Merge Strategy Details
+
+| Condition | Behavior | Output |
+|---|---|---|
+| 1 tile | Direct file write, native CRS | 1 file |
+| N tiles, same CRS, `MERGE_SAME_CRS=true` | `combine_first` mosaic, no resampling | 1 file |
+| N tiles, mixed CRS, `MERGE_CROSS_CRS=true` | Bilinear reproject minority → `combine_first` | 1 file |
+| `MERGE_SAME_CRS=false` | One file per tile, native CRS | N files |
+| `MERGE_CROSS_CRS=false` | One file per tile, native CRS, no reprojection | N files |
+
+Dominant CRS = the CRS group with the most total pixels (y × x) within the polygon.
+
 ## Pipeline Execution Model
+
+### Phenology pipeline
 
 `vi_phenology.py` processes one region at a time. For each region:
 1. All configured VIs are extracted (Layers 0+1) → `region_raw` dict
 2. Smoothing applied (Layer 2) → `region_smoothed` dict
-3. Parquet written to disk
-4. Metrics computed and per-region CSV written to disk
-5. Plots generated and written to disk
-6. `region_raw` and `region_smoothed` go out of scope (GC-eligible)
-7. Next region begins
+3. Parquet written to disk (if `config.save_parquet`)
+4. Observations CSV written to disk (if `config.save_observations_csv`)
+5. Metrics computed and per-region CSV written to disk (if `config.compute_metrics`)
+6. Plots generated and written to disk (if any plot toggle is enabled)
+7. `region_raw` and `region_smoothed` go out of scope (GC-eligible)
+8. Next region begins
 
-The combined shapefile metrics CSV (`write_combined_metrics`) is the only output that
-waits until all regions are complete — it requires the full accumulated `metrics_df`.
+Combined shapefile outputs (`write_combined_metrics`, `write_combined_parquet`,
+`write_combined_observations_csv`) wait until all regions are complete.
+These are gated by `config.save_combined_outputs` (for Parquet + observations CSV)
+and `config.compute_metrics` (for the metrics CSV).
 
-Region enumeration is done upfront by `extract.enumerate_regions(config)`, which
-expands all shapefiles into their constituent (region_label, roi_gdf) pairs and
-validates that each shapefile path exists.
+### Output Toggles (phenology pipeline only)
+
+All output types are enabled by default. Disable individually via CLI flags or
+`run_phenology.sh` variables:
+
+| Config field | CLI flag | `run_phenology.sh` | Controls |
+|---|---|---|---|
+| `save_parquet` | `--no-parquet` | `SAVE_PARQUET=false` | Per-region Parquet time series |
+| `save_observations_csv` | `--no-observations-csv` | `SAVE_OBSERVATIONS_CSV=false` | Per-region observations CSV |
+| `save_combined_outputs` | `--no-combined-outputs` | `SAVE_COMBINED_OUTPUTS=false` | Combined shapefile Parquet + observations CSV |
+| `plot_annual` | `--no-plot-annual` | `PLOT_ANNUAL=false` | Annual DOY overlay plot |
+| `plot_timeseries` | `--no-plot-timeseries` | `PLOT_TIMESERIES=false` | Full calendar time-series plot |
+| `plot_anomaly` | `--no-plot-anomaly` | `PLOT_ANOMALY=false` | Anomaly (departure from mean) plot |
+| `plot_multi_vi` | `--no-plot-multi-vi` | `PLOT_MULTI_VI=false` | Multi-VI comparison panel |
+
+These are stored as boolean fields in `PhenologyConfig` (all default `True`).
 
 ## Inter-Module Data Contract
 
-The primary data bus between layers is a `dict` keyed by `(vi, region_label)` tuple,
+The primary data bus between phenology layers is a `dict` keyed by `(vi, region_label)` tuple,
 where each value is a `pd.DataFrame`. Columns accumulate across layers:
 
 | Column | Type | Added by | Notes |
@@ -111,19 +212,16 @@ dicts; `smoothed` may be `None` when smooth_method is 'none'.
 
 | Module | Role |
 |--------|------|
-| `vi_phenology.py` | CLI entrypoint (argparse); streaming per-region pipeline orchestration |
+| `vi_phenology.py` | CLI entrypoint (argparse); streaming per-region phenology pipeline orchestration |
 | `phenology_config.py` | `PhenologyConfig` dataclass; built from parsed CLI args |
 | `extract.py` | Layers 0+1 — NetCDF discovery, region enumeration, spatial masking, ROI aggregation, daily reindex |
 | `smooth.py` | Layer 2 — gap-fill and smooth; smoothing-on-obs-dates-first strategy |
 | `metrics.py` | Layer 3 — SOS, POS, EOS, LOS, IVI, greening/senescence rates |
 | `plot.py` | Matplotlib static (PNG) + Plotly interactive (HTML) phenology plots |
-| `io_utils.py` | Parquet read/write, NetCDF file discovery helpers |
+| `io_utils.py` | Shared utilities: Parquet I/O, NetCDF file discovery, `sanitize_label`, `load_shapefile_regions`, `parse_valid_range`, `read_netcdf_crs`, `setup_log_file` |
+| `netcdf_datacube_extract.py` | Standalone CLI: per-pixel CF-1.8 datacube extraction with two-phase parallel tile processing and CRS-aware merge |
 
 ## Key Design Decisions
-
-### Spatial Aggregation Modes
-- `roi_mean` (default): mask pixels to shapefile, aggregate spatially to one time series per region
-- `per_pixel`: preserve spatial dimensions (output is larger; Zarr recommended for future extension)
 
 ### Smoothing: Obs-First Strategy
 Do NOT apply smoothing directly to a NaN-filled daily series — this causes artifacts at
@@ -173,13 +271,28 @@ by `compute_metrics()` regardless. Dissolved shapefiles (field value `'none'`) a
 `write_combined_metrics()`.
 
 ### Valid Range Application
-Apply `--valid-range-{vi}` at extraction time (Layer 0), before spatial aggregation.
-Pixels outside `[vmin, vmax]` → NaN before computing the spatial mean.
+Apply `--valid-range-{vi}` at extraction time (Layer 0 for phenology; Phase 1 worker for datacube),
+before spatial aggregation or output. Pixels outside `[vmin, vmax]` → NaN.
 
-### Multi-Tile Handling
+### Multi-Tile Handling — Phenology Pipeline
 If a shapefile spans multiple MGRS tiles, pool all valid pixels from all overlapping tiles
 **per observation date** before computing the spatial mean (not concatenate-then-average).
 Read CRS from `spatial_ref` variable WKT (CF-1.8 grid mapping convention).
+
+### Multi-Tile Handling — Datacube Pipeline
+Phase 2 reads CRS from each temp file's `spatial_ref` variable WKT, normalizes to EPSG
+integers using `pyproj.CRS.from_wkt(wkt).to_epsg()` (more robust than WKT string comparison),
+and groups tiles by CRS. The merge strategy is then applied as described in the Two-Phase
+Model section above.
+
+For same-CRS merges: adjacent HLS MGRS tiles in the same UTM zone share an **identical 30-m
+pixel grid** — no resampling is needed. `combine_first` is first-wins for the ~163-pixel
+MGRS overlap zone and provides time union across all tile acquisition dates.
+
+For cross-CRS merges: bilinear reprojection between adjacent UTM zones introduces sub-pixel
+mixing comparable to the sensor point spread function — scientifically acceptable for VI
+analysis at 30 m. The target CRS and `resampling_method='bilinear'` are written to the
+output file's global attributes.
 
 ### Annual Windows
 `--year-start-doy` (default 1 = Jan 1) allows non-calendar-year seasons. Set it to the
@@ -191,32 +304,39 @@ Read CRS from `spatial_ref` variable WKT (CF-1.8 grid mapping convention).
 annual phenology plot, which always groups by calendar year and displays DOY 1–365 (Jan–Dec).
 
 ### Tile-Level Parallelism
-Tile extraction uses `concurrent.futures.ProcessPoolExecutor` (`--workers N`, default 8).
-The worker function `_process_one_tile()` in `extract.py` **must** remain at module top
-level (not nested) to be picklable by multiprocessing on all platforms.
+Both pipelines use `concurrent.futures.ProcessPoolExecutor` (`--workers N`, default 8).
+Worker functions (`_process_one_tile()` in `extract.py`, `_extract_datacube_one_tile()` in
+`netcdf_datacube_extract.py`) **must** remain at module top level (not nested) to be
+picklable by multiprocessing on all platforms.
 
 Inside each worker, dask computation is wrapped in `with dask.config.set(scheduler='synchronous'):`.
 This is critical — without it, each worker spawns its own dask thread pool, causing all
-workers to compete for the same cores and eliminating the parallelism benefit. This is the
-same pattern used in HLS_VI_Pipeline Steps 04–10.
+workers to compete for the same cores and eliminating the parallelism benefit.
 
 ### Memory-Safe NetCDF Chunking
-Both `clip_netcdf_to_roi()` and `open_full_extent()` open files with `chunks={}` to use
-the file's native chunk layout. With `dask.config.set(scheduler='synchronous')`, dask
-processes one native chunk at a time sequentially, keeping peak memory bounded at the
-native chunk size × the spatial footprint.
+All `xr.open_dataset()` calls use `chunks={}` to use the file's native chunk layout.
+With `dask.config.set(scheduler='synchronous')`, dask processes one native chunk at a time
+sequentially, keeping peak memory bounded at the native chunk size × the spatial footprint.
 
 Do NOT use `chunks={'time': 1}` — if the file's native time chunks are larger than 1,
 xarray must decompress the full native chunk just to extract a single time step, causing
-severe I/O amplification (the file is read once per time step instead of once per native
-chunk). Use `chunks={}` and let the native storage layout determine the memory footprint.
+severe I/O amplification.
+
+### Datacube Temp File Strategy
+Phase 1 workers write to `{output_dir}/{region_label}/_tmp/{VI}_{tile_id}_clip.nc`.
+Workers return only small status dicts — they never return DataArrays across the process
+boundary. This keeps inter-process communication cheap regardless of datacube size.
+Phase 2 opens temp files lazily (`chunks={}`), performs the merge, and writes the final
+output. `_cleanup_temps()` is called in a `try/finally` block to guarantee temp directory
+removal even if Phase 2 raises an exception.
 
 ## Key Implementation Notes
 
 ### `rioxarray` Side-Effect Import
-`extract.py` imports `rioxarray` as `# noqa: F401` to activate the `.rio` accessor on
-xarray objects. This import must be present even though `rioxarray` is never referenced
-directly by name — without it, `.rio.clip()` and `.rio.write_crs()` do not exist.
+Both `extract.py` and `netcdf_datacube_extract.py` import `rioxarray` as `# noqa: F401`
+to activate the `.rio` accessor on xarray objects. This import must be present even though
+`rioxarray` is never referenced directly by name — without it, `.rio.clip()`,
+`.rio.write_crs()`, and `.rio.reproject()` do not exist.
 
 ### `matplotlib` Backend
 `plot.py` calls `matplotlib.use("Agg")` at module level (before any other matplotlib
@@ -224,21 +344,21 @@ import) to force the non-interactive PNG backend. Do not move or remove this cal
 
 ### NetCDF Discovery — Canonical Location
 `io_utils.discover_netcdfs_for_vi()` is the canonical implementation for finding
-`T{TILE}_{VI}.nc` files. `discover_netcdfs()` in `extract.py` delegates to it.
+`T{TILE}_{VI}.nc` files. Both pipelines use it: `discover_netcdfs()` in `extract.py`
+delegates to it; `netcdf_datacube_extract.py` imports and calls it directly.
 
 ### Supported VIs
-`--vi` choices are hard-coded in `vi_phenology.py` (`choices=["NDVI", "EVI2", "NIRv"]`).
-Adding a new VI requires updating that list, adding a `--valid-range-{vi}` argument,
-and adding its entry to the `valid_ranges` dict in `main()`.
+`--vi` choices are hard-coded in both CLI entry points (`choices=["NDVI", "EVI2", "NIRv"]`).
+Adding a new VI requires updating that list in both files, adding a `--valid-range-{vi}`
+argument, and adding its entry to the `valid_ranges` dict in `main()` of each.
 
 ### `--shapefile` and `--shapefile-field`
-`--shapefile` is `nargs="+"` — multiple shapefiles produce independent time series per
-file, each written to its own subdirectory.
+`--shapefile` is `nargs="+"` — multiple shapefiles produce independent outputs per file.
 
 `--shapefile-field` is also `nargs="+"` and accepts one field name per shapefile, in the
 same positional order as `--shapefile`. The count must match exactly — a mismatch raises
-a hard error in `PhenologyConfig.__post_init__`. Use the special value `none`
-(case-insensitive) to dissolve a specific shapefile instead of splitting it:
+a hard error. Use the special value `none` (case-insensitive) to dissolve a specific
+shapefile instead of splitting it:
 
 ```
 --shapefile flights.shp tiles.geojson --shapefile-field box_nr none
@@ -246,21 +366,22 @@ a hard error in `PhenologyConfig.__post_init__`. Use the special value `none`
 
 When `--shapefile-field` is omitted entirely, all shapefiles are dissolved.
 
-The field value for each shapefile is looked up via `PhenologyConfig.field_for_shapefile(index)`,
-which returns `None` for dissolved shapefiles (value `'none'`) and the field name otherwise.
+In the phenology pipeline, field handling is in `PhenologyConfig.field_for_shapefile(index)`.
+In the datacube pipeline, it is handled inline in `main()` and via `_load_regions()`.
 
-Splitting is implemented in `extract.load_shapefile_regions(shapefile_path, field=None)`,
-which returns a list of `(region_label, GeoDataFrame)` pairs. Field values are sanitized
-(spaces/special chars → underscores) via `extract._sanitize_label()`.
+Both pipelines sanitize field values via `_sanitize_label()` (spaces/special chars → underscores).
+The phenology version lives in `extract.py`; the datacube version is inlined in
+`netcdf_datacube_extract.py` to avoid coupling.
 
 ## Input NetCDF Format
 
-Expected dimensions: `time` (int32, "days since 1970-01-01"), `y`, `x` (meters)
-CRS stored in `spatial_ref` variable as WKT (CF-1.8 grid mapping convention)
+Expected dimensions: `time` (decoded to datetime64[ns] by xarray), `y`, `x` (meters)
+CRS stored in `spatial_ref` variable — check for `crs_wkt` attr first, then `spatial_ref` attr
 One file per tile+VI: `T{TILE}_{VI}.nc` (HLS_VI_Pipeline naming convention)
-Tool can accept any NetCDF matching the dimension/CRS structure above.
 
 ## Output File Naming
+
+### Phenology pipeline
 
 | Output | Pattern | Location |
 |--------|---------|----------|
@@ -274,29 +395,22 @@ Tool can accept any NetCDF matching the dimension/CRS structure above.
 | Full time-series plot | `{VI}_{region_label}_timeseries.{ext}` | per-region subdirectory |
 | Anomaly plot | `{VI}_{region_label}_anomaly.{ext}` | per-region subdirectory |
 | Multi-VI comparison | `{region_label}_multi_vi.{ext}` | per-region subdirectory |
+| Log file | `vi_phenology_{YYYYMMDD_HHMMSS}.log` | `--output-dir` root |
 
-Per-region Parquet: full daily series (all 365 rows/year including NaN gap days, `vi_smooth`,
-`vi_smooth_flag`). Complete Layer 1 + Layer 2 record. Columns: `date, vi_raw, vi_count, vi_std,
-vi_daily` plus `vi_smooth, vi_smooth_flag` when smoothing is applied.
+### netCDF datacube pipeline
 
-Combined shapefile Parquet: all regions stacked with a leading `region` column; contains the
-same full daily rows as the per-region files. Written to the shapefile root folder when
-`--shapefile-field` yields multiple regions. Skipped for dissolved shapefiles and full-extent runs.
+| Output | Pattern | Location |
+|--------|---------|----------|
+| Merged datacube | `{VI}_{region_label}_datacube.nc` | `{output_dir}/{shapefile_stem}/{region_label}/` |
+| Per-tile datacube (no merge) | `{VI}_{region_label}_{tile_id}_datacube.nc` | `{output_dir}/{shapefile_stem}/{region_label}/` |
+| Full-extent datacube (no shapefile) | `{VI}_full_extent_datacube.nc` | `{output_dir}/full_extent/` |
+| Temp clip files | `{VI}_{tile_id}_clip.nc` | `{output_dir}/{shapefile_stem}/{region_label}/_tmp/` (deleted after Phase 2) |
+| Log file | `netcdf_datacube_{YYYYMMDD_HHMMSS}.log` | `--output-dir` root |
 
-Observations CSV: always written per-region. Contains only `vi_count > 0` rows (actual HLS
-acquisitions). No gap-filled or interpolated rows. Columns: `date, vi_raw, vi_count, vi_std`
-plus `vi_smooth` at observation dates when smoothing is applied.
-
-Combined observations CSV and combined metrics CSV: written to the shapefile root folder when
-`--shapefile-field` yields multiple regions for a shapefile. Skipped for dissolved shapefiles
-(single region) and full-extent runs.
-
-`region_label` is determined as follows:
+`region_label` is determined as follows for both pipelines:
 
 | Scenario | `region_label` |
 |---|---|
 | No shapefile | `full_extent` |
 | Shapefile, no `--shapefile-field` | Shapefile filename stem |
 | Shapefile + `--shapefile-field` | Sanitized field value (spaces/specials → `_`) |
-
-Field-value sanitization is handled by `extract._sanitize_label()`.

@@ -2,12 +2,15 @@
 
 ---
 
-## File Structure
+## Phenology Pipeline
+
+### File Structure
 
 Outputs are organized into per-region subdirectories when shapefiles are provided:
 
 ```
 outputs/                                         ← --output-dir
+├── vi_phenology_20260303_153100.log             ← log file at output-dir root
 └── biomes/                                      ← shapefile stem folder
     ├── Cape_Fynbos/                             ← one subfolder per field value
     │   ├── NDVI_Cape_Fynbos_timeseries.parquet
@@ -34,7 +37,7 @@ and the region label is `full_extent`.
 
 ---
 
-## Output Files
+### Output Files
 
 | File | Description |
 |------|-------------|
@@ -51,7 +54,28 @@ and the region label is `full_extent`.
 
 ---
 
-## Parquet Schema
+### Output Toggles
+
+All output types are enabled by default. Disable any combination in `run_phenology.sh`:
+
+```bash
+SAVE_PARQUET=false            # skip per-region Parquet files
+SAVE_OBSERVATIONS_CSV=false   # skip per-region observations CSV files
+SAVE_COMBINED_OUTPUTS=false   # skip combined shapefile Parquet + observations CSV
+PLOT_ANNUAL=false             # skip annual DOY overlay plot
+PLOT_TIMESERIES=false         # skip full time-series plot
+PLOT_ANOMALY=false            # skip anomaly plot
+PLOT_MULTI_VI=false           # skip multi-VI comparison panel
+```
+
+Or via CLI flags: `--no-parquet`, `--no-observations-csv`, `--no-combined-outputs`,
+`--no-plot-annual`, `--no-plot-timeseries`, `--no-plot-anomaly`, `--no-plot-multi-vi`.
+
+See [CLI Reference](cli_reference.md) for the full toggle table.
+
+---
+
+### Parquet Schema
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -65,13 +89,81 @@ and the region label is `full_extent`.
 
 ---
 
+## netCDF Datacube Pipeline
+
+### File Structure
+
+```
+outputs/                                              ← --output-dir
+├── netcdf_datacube_20260312_153100.log               ← log file at output-dir root
+└── Parks_and_OpenSpace/                              ← shapefile stem
+    ├── Mesa_Verde/                                   ← one subfolder per region
+    │   ├── NDVI_Mesa_Verde_datacube.nc               ← merged datacube (default)
+    │   └── EVI2_Mesa_Verde_datacube.nc
+    └── Ridgway_State_Park/
+        └── NDVI_Ridgway_State_Park_datacube.nc
+```
+
+When no shapefile is provided (full-extent mode), outputs go into
+`outputs/full_extent/` directly.
+
+When `--no-merge-same-crs` or `--no-merge-cross-crs` is set, each tile writes its
+own file:
+
+```
+outputs/
+└── Parks_and_OpenSpace/
+    └── Mesa_Verde/
+        ├── NDVI_Mesa_Verde_T13SDA_datacube.nc
+        └── NDVI_Mesa_Verde_T13SDB_datacube.nc
+```
+
+---
+
+### Output Files
+
+| File | Description |
+|------|-------------|
+| `{VI}_{region}_datacube.nc` | Merged per-pixel datacube: all contributing tiles merged into one CF-1.8 netCDF |
+| `{VI}_{region}_{tile_id}_datacube.nc` | Per-tile datacube when merge is disabled (native CRS, no reprojection) |
+| `netcdf_datacube_{timestamp}.log` | Timestamped log file |
+
+---
+
+### NetCDF Schema
+
+**Dimensions:** `time`, `y` (northing, meters), `x` (easting, meters)
+
+**Variables:**
+- `{VI}` — float32 `(time, y, x)`, NaN where no valid data
+- `spatial_ref` — scalar CRS container (CF-1.8 grid mapping convention)
+
+**Global attributes:**
+
+| Attribute | Present when | Description |
+|---|---|---|
+| `Conventions` | always | `'CF-1.8'` |
+| `history` | always | Creation timestamp, region, valid range |
+| `tiles` | always | Source tile IDs (comma-separated, e.g. `'T13SDA, T13SDB'`) |
+| `region` | always | Region label |
+| `vi` | always | VI name (e.g. `'NDVI'`) |
+| `target_crs` | cross-CRS merge only | Target CRS for reprojected tiles (e.g. `'EPSG:32613'`) |
+| `resampling_method` | cross-CRS merge only | `'bilinear'` |
+
+For full details on the datacube pipeline, see [netCDF Datacube Pipeline](datacube.md).
+
+---
+
 ## Date Range Filtering
 
-Use `--start-date` and `--end-date` to restrict processing to a specific time window. Filtering
-is applied at the NetCDF level before any spatial aggregation, keeping memory use low even on
-large multi-year datasets:
+Use `--start-date` and `--end-date` to restrict processing to a specific time window.
+Filtering is applied at the NetCDF level before any spatial aggregation or clipping,
+keeping memory use low even on large multi-year datasets.
+
+Works identically in both pipelines:
 
 ```bash
+# Phenology pipeline
 python src/vi_phenology.py \
   --netcdf-dir /path/to/netcdfs \
   --vi NDVI \
@@ -79,6 +171,14 @@ python src/vi_phenology.py \
   --start-date 2021-01-01 \
   --end-date   2023-12-31 \
   --metrics
+
+# Datacube pipeline
+python src/netcdf_datacube_extract.py \
+  --netcdf-dir /path/to/netcdfs \
+  --vi NDVI \
+  --output-dir ./outputs \
+  --start-date 2021-01-01 \
+  --end-date   2023-12-31
 ```
 
 Either bound can be omitted to apply only a lower or upper limit.
@@ -101,13 +201,20 @@ All progress, warnings, and errors are written to the terminal (stderr) using Py
 By default, a timestamped log file is automatically written to `--output-dir`:
 
 ```
-outputs/vi_phenology_20260303_153100.log
+outputs/vi_phenology_20260303_153100.log        ← phenology pipeline
+outputs/netcdf_datacube_20260303_153100.log     ← datacube pipeline
 ```
 
 To disable automatic log file creation:
 
 ```bash
 python src/vi_phenology.py --no-logfile ...
+python src/netcdf_datacube_extract.py --no-logfile ...
+```
+
+Or in `run_phenology.sh`:
+```bash
+NO_LOGFILE=true
 ```
 
 ### Verbosity Levels

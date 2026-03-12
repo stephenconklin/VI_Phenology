@@ -8,7 +8,7 @@
 # Author:  Stephen Conklin <stephenconklin@gmail.com>
 # License: MIT
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -37,10 +37,7 @@ class PhenologyConfig:
     sos_threshold: float                 # fraction of amplitude (default 0.20)
     year_start_doy: int                  # 1 = Jan 1; >1 shifts annual window
 
-    # Spatial mode
-    mode: str                            # roi_mean | per_pixel
-
-    # Plotting
+    # Plotting style/format
     plot_style: str                      # raw | smooth | combined
     plot_formats: list                   # ["png"] | ["html"] | ["png", "html"]
 
@@ -54,6 +51,15 @@ class PhenologyConfig:
 
     # Parallelization
     n_workers: int = 4                  # parallel worker processes for tile extraction
+
+    # Output toggles — all True by default for backwards compatibility
+    save_parquet: bool = True            # write per-region Parquet time series
+    save_observations_csv: bool = True   # write per-region observations-only CSV
+    save_combined_outputs: bool = True   # write combined shapefile Parquet + observations CSV
+    plot_annual: bool = True             # annual DOY overlay plot
+    plot_timeseries: bool = True         # full calendar time-series plot
+    plot_anomaly: bool = True            # anomaly (departure from multi-year mean) plot
+    plot_multi_vi: bool = True           # multi-VI comparison plot
 
     def __post_init__(self):
         """Validate configuration values at construction time."""

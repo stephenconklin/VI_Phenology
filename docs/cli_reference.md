@@ -1,9 +1,10 @@
 # CLI Reference
 
-All parameters are available via `python src/vi_phenology.py --help`.
+This page covers the **phenology pipeline** CLI (`src/vi_phenology.py`).
+For the netCDF datacube pipeline CLI, see [netCDF Datacube Pipeline](datacube.md).
 
-The recommended way to run the tool is via `run_phenology.sh` — edit its variables and run
-`./run_phenology.sh`. All parameters are documented with inline comments inside the script.
+The recommended way to run either pipeline is via `run_phenology.sh` — edit its variables
+and run `./run_phenology.sh`. All parameters are documented with inline comments inside the script.
 
 ---
 
@@ -59,6 +60,24 @@ For full details on metrics and annual window configuration, see [Phenological M
 |----------|---------|-------------|
 | `--plot-style STYLE` | `combined` | `raw`: observation scatter only · `smooth`: smooth curve only · `combined`: smooth + scatter |
 | `--plot-format FORMAT [FORMAT ...]` | `png` | Output format(s): `png` and/or `html` |
+
+---
+
+## Output Toggles
+
+All output types are enabled by default. Use these flags to disable specific outputs:
+
+| Argument | `run_phenology.sh` variable | Controls |
+|----------|------|---------|
+| `--no-parquet` | `SAVE_PARQUET=false` | Per-region Parquet time-series files |
+| `--no-observations-csv` | `SAVE_OBSERVATIONS_CSV=false` | Per-region observations-only CSV files |
+| `--no-combined-outputs` | `SAVE_COMBINED_OUTPUTS=false` | Combined shapefile Parquet + observations CSV |
+| `--no-plot-annual` | `PLOT_ANNUAL=false` | Annual DOY overlay plot |
+| `--no-plot-timeseries` | `PLOT_TIMESERIES=false` | Full calendar time-series plot |
+| `--no-plot-anomaly` | `PLOT_ANOMALY=false` | Anomaly (departure from multi-year mean) plot |
+| `--no-plot-multi-vi` | `PLOT_MULTI_VI=false` | Multi-VI comparison panel (requires > 1 VI) |
+
+For output file details, see [Output](output.md).
 
 ---
 

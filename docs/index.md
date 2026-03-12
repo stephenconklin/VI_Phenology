@@ -6,6 +6,7 @@
 
 overview
 cli_reference
+datacube
 spatial_input
 smoothing
 metrics

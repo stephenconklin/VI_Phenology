@@ -8,7 +8,10 @@
 # License: MIT
 
 import logging
+import re
+import sys
 
+import geopandas as gpd
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -51,6 +54,164 @@ def discover_netcdfs_for_vi(netcdf_dir: Path, vi: str) -> list:
             vi, netcdf_dir,
         )
     return paths
+
+
+# ---------------------------------------------------------------------------
+# Shared CLI / config helpers
+# ---------------------------------------------------------------------------
+
+def sanitize_label(value: str) -> str:
+    """Return a filesystem-safe region label from an arbitrary string value.
+
+    Replaces any character that is not alphanumeric, underscore, or hyphen
+    with an underscore, then strips leading/trailing underscores.
+    Falls back to 'region' if the result is empty.
+    """
+    label = re.sub(r"[^\w\-]", "_", value).strip("_")
+    return label or "region"
+
+
+def load_shapefile_regions(
+    shapefile_path: Path,
+    field: Optional[str] = None,
+) -> list:
+    """Load a shapefile and return a list of (region_label, GeoDataFrame) pairs.
+
+    When field is None (default):
+        Dissolves all features into a single geometry.
+        Returns [(shapefile_stem, dissolved_gdf)].
+
+    When field is set:
+        Splits by unique non-null values in that column.
+        Each group is dissolved independently.
+        Returns [(sanitized_value1, gdf1), (sanitized_value2, gdf2), ...]
+        sorted by field value.
+
+    Raises ValueError if field is specified but not present in the shapefile.
+    """
+    gdf = gpd.read_file(shapefile_path)
+
+    if field is None:
+        dissolved = gdf.dissolve()
+        label = shapefile_path.stem
+        logger.debug(
+            "Shapefile '%s': %d feature(s) dissolved to 1 geometry (CRS: %s)",
+            shapefile_path.name, len(gdf), gdf.crs,
+        )
+        return [(label, dissolved)]
+
+    if field not in gdf.columns:
+        raise ValueError(
+            f"Field '{field}' not found in '{shapefile_path.name}'. "
+            f"Available fields: {list(gdf.columns)}"
+        )
+
+    unique_values = sorted(gdf[field].dropna().unique())
+    logger.debug(
+        "Shapefile '%s': splitting by field '%s' → %d unique value(s)",
+        shapefile_path.name, field, len(unique_values),
+    )
+
+    regions = []
+    for value in unique_values:
+        subset = gdf[gdf[field] == value].copy()
+        dissolved = subset.dissolve()
+        label = sanitize_label(str(value))
+        logger.debug(
+            "  '%s'='%s' → %d feature(s), region_label='%s'",
+            field, value, len(subset), label,
+        )
+        regions.append((label, dissolved))
+
+    # Detect label collisions: two distinct field values that sanitize to the
+    # same string would cause one region's output files to overwrite the other.
+    labels = [label for label, _ in regions]
+    seen: dict = {}
+    for raw_val, label in zip(unique_values, labels):
+        if label in seen:
+            raise ValueError(
+                f"Field '{field}' in '{shapefile_path.name}': values "
+                f"'{seen[label]}' and '{raw_val}' both sanitize to the same "
+                f"region label '{label}'. Rename one value in the attribute "
+                f"table to make labels unique."
+            )
+        seen[label] = raw_val
+
+    return regions
+
+
+def parse_valid_range(raw: str, vi: str) -> tuple:
+    """Parse a 'min,max' CLI argument string to a (float, float) tuple.
+
+    Calls sys.exit(1) on parse failure with a diagnostic error message.
+    """
+    try:
+        parts = raw.split(",")
+        return float(parts[0]), float(parts[1])
+    except (ValueError, IndexError):
+        logger.error(
+            "Could not parse --valid-range-%s='%s'. Expected format: 'min,max' e.g. '-1,1'",
+            vi.lower(), raw,
+        )
+        sys.exit(1)
+
+
+def read_netcdf_crs(ds, nc_name: str = "") -> str:
+    """Extract the CRS WKT string from a CF-1.8 Dataset's spatial_ref variable.
+
+    Checks the 'crs_wkt' attribute first, then falls back to the 'spatial_ref'
+    attribute (the convention used by HLS_VI_Pipeline).
+
+    Args:
+        ds:      An open xarray Dataset containing a 'spatial_ref' variable.
+        nc_name: File name used in error messages (optional).
+
+    Returns:
+        WKT string for the CRS.
+
+    Raises:
+        ValueError if the 'spatial_ref' variable is absent or both attributes
+        are empty/missing.
+    """
+    if 'spatial_ref' not in ds:
+        raise ValueError(
+            f"NetCDF '{nc_name}' is missing the 'spatial_ref' variable "
+            "(expected CF-1.8 grid_mapping convention)."
+        )
+    wkt = (
+        ds['spatial_ref'].attrs.get('crs_wkt')
+        or ds['spatial_ref'].attrs.get('spatial_ref')
+    )
+    if not wkt:
+        raise ValueError(
+            f"NetCDF '{nc_name}': spatial_ref has neither 'crs_wkt' nor "
+            "'spatial_ref' attribute — cannot determine CRS."
+        )
+    return wkt
+
+
+def setup_log_file(output_dir: Path, prefix: str, log_level: str) -> None:
+    """Attach a timestamped log file handler to the root logger.
+
+    Creates {output_dir}/{prefix}_{YYYYMMDD_HHMMSS}.log and adds a FileHandler
+    to the root logger at the given log level with the standard format.
+
+    Args:
+        output_dir: Directory where the log file is written (must already exist).
+        prefix:     Filename prefix (e.g. 'vi_phenology', 'netcdf_datacube').
+        log_level:  String log level name (e.g. 'INFO', 'DEBUG').
+    """
+    from datetime import datetime
+    run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = output_dir / f"{prefix}_{run_ts}.log"
+    fh = logging.FileHandler(log_path, encoding="utf-8")
+    fh.setLevel(getattr(logging, log_level))
+    fh.setFormatter(logging.Formatter(
+        "%(asctime)s  %(levelname)-8s  [%(name)s]  %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+    logging.getLogger("").addHandler(fh)
+    logger.info("Log file: %s", log_path)
 
 
 # ---------------------------------------------------------------------------

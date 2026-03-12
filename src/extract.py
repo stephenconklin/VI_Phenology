@@ -17,7 +17,6 @@
 # License: MIT
 
 import logging
-import re
 import sys
 
 import numpy as np
@@ -29,6 +28,7 @@ from pathlib import Path
 from typing import Optional
 
 from phenology_config import PhenologyConfig
+from io_utils import sanitize_label, load_shapefile_regions, read_netcdf_crs
 
 logger = logging.getLogger(__name__)
 
@@ -58,72 +58,6 @@ def discover_netcdfs(netcdf_dir: Path, vi: str) -> list:
 # Spatial masking
 # ---------------------------------------------------------------------------
 
-def _sanitize_label(value: str) -> str:
-    """Return a filesystem-safe region label from an arbitrary string value.
-
-    Replaces any character that is not alphanumeric, underscore, or hyphen
-    with an underscore, then strips leading/trailing underscores.
-    Falls back to 'region' if the result is empty.
-    """
-    label = re.sub(r"[^\w\-]", "_", value).strip("_")
-    return label or "region"
-
-
-def load_shapefile_regions(
-    shapefile_path: Path,
-    field: Optional[str] = None,
-) -> list:
-    """Load a shapefile and return a list of (region_label, GeoDataFrame) pairs.
-
-    When field is None (default):
-        Dissolves all features into a single geometry.
-        Returns [(shapefile_stem, dissolved_gdf)].
-
-    When field is set:
-        Splits by unique non-null values in that column.
-        Each group is dissolved independently.
-        Returns [(sanitized_value1, gdf1), (sanitized_value2, gdf2), ...]
-        sorted by field value.
-
-    Raises ValueError if field is specified but not present in the shapefile.
-    """
-    gdf = gpd.read_file(shapefile_path)
-
-    if field is None:
-        dissolved = gdf.dissolve()
-        label = shapefile_path.stem
-        logger.debug(
-            "Shapefile '%s': %d feature(s) dissolved to 1 geometry (CRS: %s)",
-            shapefile_path.name, len(gdf), gdf.crs,
-        )
-        return [(label, dissolved)]
-
-    if field not in gdf.columns:
-        raise ValueError(
-            f"Field '{field}' not found in '{shapefile_path.name}'. "
-            f"Available fields: {list(gdf.columns)}"
-        )
-
-    unique_values = sorted(gdf[field].dropna().unique())
-    logger.debug(
-        "Shapefile '%s': splitting by field '%s' → %d unique value(s)",
-        shapefile_path.name, field, len(unique_values),
-    )
-
-    regions = []
-    for value in unique_values:
-        subset = gdf[gdf[field] == value].copy()
-        dissolved = subset.dissolve()
-        label = _sanitize_label(str(value))
-        logger.debug(
-            "  '%s'='%s' → %d feature(s), region_label='%s'",
-            field, value, len(subset), label,
-        )
-        regions.append((label, dissolved))
-
-    return regions
-
-
 def clip_netcdf_to_roi(nc_path: Path, roi_gdf: gpd.GeoDataFrame) -> Optional[xr.DataArray]:
     """Open a NetCDF, detect its CRS, reproject the ROI geometry to match,
     and return a spatially clipped DataArray.
@@ -141,21 +75,7 @@ def clip_netcdf_to_roi(nc_path: Path, roi_gdf: gpd.GeoDataFrame) -> Optional[xr.
     da = ds[vi_name]
 
     # Read CRS from spatial_ref variable (CF-1.8 grid mapping).
-    # HLS_VI_Pipeline stores WKT in the 'spatial_ref' attribute (not 'crs_wkt').
-    if 'spatial_ref' not in ds:
-        raise ValueError(
-            f"NetCDF '{nc_path.name}' is missing the 'spatial_ref' variable. "
-            "Expected CF-1.8 grid_mapping convention."
-        )
-    wkt = (
-        ds['spatial_ref'].attrs.get('crs_wkt')
-        or ds['spatial_ref'].attrs.get('spatial_ref')
-    )
-    if not wkt:
-        raise ValueError(
-            f"NetCDF '{nc_path.name}': spatial_ref variable has neither "
-            "'crs_wkt' nor 'spatial_ref' attribute — cannot determine CRS."
-        )
+    wkt = read_netcdf_crs(ds, nc_path.name)
     da = da.rio.write_crs(wkt)
 
     roi_reprojected = roi_gdf.to_crs(da.rio.crs)
@@ -190,18 +110,7 @@ def open_full_extent(nc_path: Path) -> xr.DataArray:
     ds = xr.open_dataset(nc_path, chunks={})
     da = ds[vi_name]
 
-    if 'spatial_ref' not in ds:
-        raise ValueError(
-            f"NetCDF '{nc_path.name}' is missing the 'spatial_ref' variable."
-        )
-    wkt = (
-        ds['spatial_ref'].attrs.get('crs_wkt')
-        or ds['spatial_ref'].attrs.get('spatial_ref')
-    )
-    if not wkt:
-        raise ValueError(
-            f"NetCDF '{nc_path.name}': cannot determine CRS from spatial_ref variable."
-        )
+    wkt = read_netcdf_crs(ds, nc_path.name)
     da = da.rio.write_crs(wkt)
     return da
 
@@ -567,11 +476,6 @@ def extract_timeseries(config: PhenologyConfig) -> dict:
             vi_std   (float32) — Layer 0: NaN on non-obs days
             vi_daily (float32) — Layer 1: same as vi_raw (explicit daily column)
     """
-    if config.mode == 'per_pixel':
-        raise NotImplementedError(
-            "--mode per_pixel is not yet implemented. Use --mode roi_mean instead."
-        )
-
     result = {}
     shapefiles = config.shapefiles if config.shapefiles else [None]
 
