@@ -30,7 +30,7 @@ venv/
 docs/_build/
 
 # macOS
-.DS_Store
+**/.DS_Store
 .AppleDouble
 .LSOverride
 ._*
@@ -71,7 +71,8 @@ $RECYCLE.BIN/
 *.kml
 *.kmz
 
-# Claude Code auto-memory (tooling artifacts, not project docs)
+# Claude Code (tooling artifacts and local settings — not project docs)
+.claude/
 memory/
 
 # Pipeline outputs (go to --output-dir, not the repo)
