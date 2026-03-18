@@ -71,6 +71,9 @@ $RECYCLE.BIN/
 *.kml
 *.kmz
 
+# Claude Code auto-memory (tooling artifacts, not project docs)
+memory/
+
 # Pipeline outputs (go to --output-dir, not the repo)
 outputs/
 _tmp/
