@@ -122,8 +122,13 @@ Layer 3 requires Layer 2 and `--metrics` flag.
 ## Architecture: netCDF Datacube Two-Phase Model
 
 ```
+Pre-filter (main process, sequential, before worker dispatch)
+  For each tile: read x/y coordinate min/max only (4 scalar values, no data decompression)
+  Reproject ROI bounding box to tile CRS → bounding-box intersection test
+  Exclude non-overlapping tiles before any worker is spawned
+   ↓
 Phase 1 (parallel workers)
-  For each tile:
+  For each bbox-passing tile:
     Open NetCDF → clip to ROI → apply valid-range mask → write temp netCDF
     (workers return only small status dicts — never large arrays across process boundary)
    ↓
@@ -281,9 +286,30 @@ Read CRS from `spatial_ref` variable WKT (CF-1.8 grid mapping convention).
 
 ### Multi-Tile Handling — Datacube Pipeline
 Phase 2 reads CRS from each temp file's `spatial_ref` variable WKT, normalizes to EPSG
-integers using `pyproj.CRS.from_wkt(wkt).to_epsg()` (more robust than WKT string comparison),
-and groups tiles by CRS. The merge strategy is then applied as described in the Two-Phase
-Model section above.
+integers using `pyproj.CRS.from_wkt(wkt).to_epsg(min_confidence=20)` (more robust than
+WKT string comparison), and groups tiles by CRS. The merge strategy is then applied as
+described in the Two-Phase Model section above.
+
+**HLS 2.0 CRS quirks:** Two separate quirks apply to HLS v2.0 source data, both fixed
+upstream in `03_hls_netcdf_build.py` of HLS_VI_Pipeline:
+
+1. **Non-standard datum name** — HLS v2.0 tiles embed `"Not specified (based on WGS 84
+   spheroid)"` as the datum name. pyproj's default `to_epsg()` (min_confidence=70) returns
+   `None` for these WKTs. `_merge_and_write_datacube()` uses `min_confidence=20` to
+   reliably resolve them to their EPSG integer so same-UTM-zone tiles group correctly. The
+   fallback when EPSG resolution still fails is `crs_obj.name` (never the raw WKT string,
+   which can differ between GDAL versions and cause false cross-CRS grouping).
+
+2. **Southern hemisphere tiles stored as UTM North** — HLS v2.0 GeoTIFFs for tiles south
+   of the equator use a UTM North zone (EPSG:326xx, false_northing=0) with negative
+   northings instead of the standard UTM South convention (EPSG:327xx,
+   false_northing=10,000,000). `03_hls_netcdf_build.py` now corrects this automatically
+   (EPSG + 100, y-coords + 10,000,000 m). NetCDF files from a corrected pipeline run carry
+   EPSG:327xx CRS with positive northings. Older files with the UTM North / negative-
+   northing convention remain spatially consistent for all VI_Phenology operations (both
+   tile and ROI are projected in the same UTM North space), but will carry an incorrect
+   northern hemisphere CRS label in any output datacube; rebuilding with step 03 resolves
+   this fully.
 
 For same-CRS merges: adjacent HLS MGRS tiles in the same UTM zone share an **identical 30-m
 pixel grid** — no resampling is needed. `combine_first` is first-wins for the ~163-pixel
@@ -330,7 +356,27 @@ Phase 2 opens temp files lazily (`chunks={}`), performs the merge, and writes th
 output. `_cleanup_temps()` is called in a `try/finally` block to guarantee temp directory
 removal even if Phase 2 raises an exception.
 
+Temp files are written **without compression** — they are written once, read once by
+Phase 2, then deleted. Compression would add significant CPU overhead for no lasting
+benefit, particularly on external drives with `scheduler='synchronous'`.
+Final output datacubes use `complevel=4` — VI data compresses well (NaN-heavy,
+spatially smooth) and typically yields 5–10× size reduction vs. uncompressed NetCDF4.
+
 ## Key Implementation Notes
+
+### NetCDF Output Compression
+All `to_netcdf()` calls in `netcdf_datacube_extract.py` must include an `encoding` dict:
+```python
+encoding={vi: {'zlib': True, 'complevel': 4}}   # final output
+encoding={vi: {'zlib': True, 'complevel': 1}}   # Phase 1 temp files
+```
+Do NOT call `to_netcdf()` without `encoding` — xarray's default is uncompressed NetCDF4,
+which produces files orders of magnitude larger than necessary (e.g. a 853×4611 px,
+1465-step datacube would be ~23 GB uncompressed vs. ~2–5 GB compressed).
+
+### NumPy 2.x Compatibility
+Use `np.trapezoid` (not `np.trapz`, which was removed in NumPy 2.0). The conda env
+uses NumPy 2.x — `np.trapz` will raise `AttributeError` at runtime.
 
 ### `rioxarray` Side-Effect Import
 Both `extract.py` and `netcdf_datacube_extract.py` import `rioxarray` as `# noqa: F401`
@@ -367,11 +413,10 @@ shapefile instead of splitting it:
 When `--shapefile-field` is omitted entirely, all shapefiles are dissolved.
 
 In the phenology pipeline, field handling is in `PhenologyConfig.field_for_shapefile(index)`.
-In the datacube pipeline, it is handled inline in `main()` and via `_load_regions()`.
+In the datacube pipeline, it is handled inline in `main()`.
 
-Both pipelines sanitize field values via `_sanitize_label()` (spaces/special chars → underscores).
-The phenology version lives in `extract.py`; the datacube version is inlined in
-`netcdf_datacube_extract.py` to avoid coupling.
+Both pipelines sanitize field values via `sanitize_label()` (spaces/special chars → underscores),
+which lives in `io_utils.py` and is imported by both.
 
 ## Input NetCDF Format
 

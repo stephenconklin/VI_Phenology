@@ -10,11 +10,13 @@
 PIPELINE="netcdf_datacube"
 
 # ── Inputs ────────────────────────────────────────────────────────────────────
-NETCDF_DIR="/Volumes/ConklinGeospatialData/Data/BioSCape_SA/2_Interim/2_NetCDF"
+NETCDF_DIR="/Volumes/ConklinGeospatialData/Data/BioSCape_SA_LVIS/2_Interim/2_NetCDF"
+
 # VI="NDVI EVI2 NIRv"                        # space-separated; choices: NDVI EVI2 NIRv
 VI="NDVI"                        # space-separated; choices: NDVI EVI2 NIRv
+
 # ── Output ─────────────────────────────────────────────────────────────────────
-OUTPUT_DIR="/Volumes/ConklinGeospatialData/Data/BioSCape_SA/VI_Phenology"
+OUTPUT_DIR="/Volumes/ConklinGeospatialData/Data/BioSCape_SA_LVIS/VI_Phenology"
 
 # ── Shapefile(s) ──────────────────────────────────────────────────────────────
 # Accepts any GeoPandas-readable vector format: .shp, .gpkg, .geojson, .kml, .fgb, .gdb, etc.

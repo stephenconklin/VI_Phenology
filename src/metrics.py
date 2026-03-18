@@ -348,7 +348,7 @@ def write_combined_metrics(metrics_df: pd.DataFrame, config: PhenologyConfig) ->
         return
 
     import geopandas as gpd
-    from extract import _sanitize_label
+    from io_utils import sanitize_label
 
     for sf_index, shapefile in enumerate(config.shapefiles):
         field = config.field_for_shapefile(sf_index)
@@ -380,7 +380,7 @@ def write_combined_metrics(metrics_df: pd.DataFrame, config: PhenologyConfig) ->
             continue
 
         region_labels = {
-            _sanitize_label(str(v))
+            sanitize_label(str(v))
             for v in gdf[field].dropna().unique()
         }
 

@@ -237,6 +237,82 @@ def _extract_datacube_one_tile(args: tuple) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Bounding-box pre-filter (main process, before worker dispatch)
+# ---------------------------------------------------------------------------
+
+def _prefilter_tiles_by_bbox(
+    nc_paths: list,
+    roi_gdf: gpd.GeoDataFrame,
+    vi: str,
+) -> list:
+    """Return only tiles whose spatial extent intersects the ROI bounding box.
+
+    Reads just the first and last values of each tile's x/y coordinate arrays
+    (4 scalar reads per file, no data decompression) to determine the tile
+    bounding box, then tests against the ROI bounding box reprojected into the
+    tile's native CRS.  Runs sequentially in the main process before workers
+    are dispatched — far cheaper than dispatching all tiles and letting workers
+    fail with NoDataInBounds.
+
+    Tiles that cannot be opened or whose CRS cannot be read are included in the
+    output as a safe fallback (they will be handled normally by the worker).
+
+    Args:
+        nc_paths: Full list of candidate tile paths.
+        roi_gdf:  ROI GeoDataFrame (any CRS).
+        vi:       VI variable name — dropped when opening so only coordinate
+                  metadata is loaded.
+
+    Returns:
+        Filtered list of nc_paths that may overlap the ROI.
+    """
+    from pyproj import CRS as ProjCRS
+
+    filtered = []
+    n_skipped = 0
+
+    for nc_path in nc_paths:
+        try:
+            # Open metadata only — skip the large data variable and sensor array.
+            ds = xr.open_dataset(nc_path, chunks={}, drop_variables=[vi, 'sensor'])
+            wkt = read_netcdf_crs(ds, nc_path.name)
+
+            # Tile bounding box in native CRS (first/last coordinate values only).
+            x_min = float(ds.x.values[0])
+            x_max = float(ds.x.values[-1])
+            y_min = min(float(ds.y.values[0]), float(ds.y.values[-1]))
+            y_max = max(float(ds.y.values[0]), float(ds.y.values[-1]))
+            ds.close()
+
+            # Reproject ROI bounding box into tile CRS for comparison.
+            crs_obj = ProjCRS.from_wkt(wkt)
+            tile_crs = crs_obj.to_epsg(min_confidence=20) or wkt
+            roi_repr = roi_gdf.to_crs(tile_crs)
+            rx_min, ry_min, rx_max, ry_max = roi_repr.total_bounds
+
+            if rx_max >= x_min and rx_min <= x_max and ry_max >= y_min and ry_min <= y_max:
+                filtered.append(nc_path)
+            else:
+                n_skipped += 1
+                logger.debug(
+                    "  Pre-filter: %s — bbox no overlap with ROI, skipping",
+                    nc_path.name,
+                )
+
+        except Exception:
+            # On any error include the tile; the worker will handle it normally.
+            filtered.append(nc_path)
+
+    if n_skipped:
+        logger.info(
+            "  Pre-filter: %d/%d tile(s) intersect ROI bbox (%d skipped)",
+            len(filtered), len(nc_paths), n_skipped,
+        )
+
+    return filtered
+
+
+# ---------------------------------------------------------------------------
 # Phase 1: parallel tile extraction to temp files
 # ---------------------------------------------------------------------------
 
@@ -258,6 +334,16 @@ def _extract_tiles_to_temp(
 
     Returns a list of (tile_id, temp_path) for all successfully clipped tiles.
     """
+    # Pre-filter tiles by bounding box before dispatching to workers.
+    # Reads only x/y coordinate min/max from each file — no data decompression.
+    # Tiles with no bbox overlap are excluded before any worker is spawned.
+    if roi_gdf is not None:
+        nc_paths = _prefilter_tiles_by_bbox(nc_paths, roi_gdf, vi)
+
+    if not nc_paths:
+        logger.warning("  [Phase 1] No tiles intersect ROI bbox — skipping dispatch")
+        return []
+
     tmp_dir = output_dir / region_label / '_tmp'
     work_items = []
     for nc_path in nc_paths:
@@ -333,11 +419,21 @@ def _merge_and_write_datacube(
         da = ds[vi]
         wkt = read_netcdf_crs(ds, temp_path.name)
         da = da.rio.write_crs(wkt)
-        # Use EPSG integer as the group key when available — more readable in logs
-        # and more robust than WKT string comparison.
+        # Normalise to an EPSG integer key for grouping.
+        # HLS 2.0 GeoTIFFs often embed a non-standard datum name
+        # ("Not specified (based on WGS 84 spheroid)") which causes
+        # pyproj's default to_epsg() (min_confidence=70) to return None
+        # even though the CRS is functionally EPSG:326xx.  Lowering the
+        # confidence threshold to 20 reliably resolves these WKTs to their
+        # correct EPSG integer so that same-UTM-zone tiles are always
+        # grouped together.  Fall back to crs_obj.name (a short readable
+        # label) if EPSG resolution fails — never use the raw WKT as a key
+        # because identical CRS definitions from different sources can
+        # produce non-equal WKT strings, causing false cross-CRS grouping.
         try:
             crs_obj = ProjCRS.from_wkt(wkt)
-            crs_key = crs_obj.to_epsg() or wkt
+            epsg = crs_obj.to_epsg(min_confidence=20)
+            crs_key = epsg if epsg is not None else crs_obj.name
         except Exception:
             crs_key = wkt
         tile_info.append({
@@ -369,9 +465,11 @@ def _merge_and_write_datacube(
         reason = "single tile"
     elif n_crs == 1 and merge_same_crs:
         do_merge = True
+        crs_key_0 = list(crs_groups.keys())[0]
+        crs_label = f"EPSG:{crs_key_0}" if isinstance(crs_key_0, int) else str(crs_key_0)
         reason = (
             f"all {n_tiles} tiles share the same CRS "
-            f"(EPSG:{list(crs_groups.keys())[0]}) — "
+            f"({crs_label}) — "
             "combine_first mosaic, no resampling"
         )
     elif n_crs > 1 and merge_cross_crs:
@@ -410,7 +508,7 @@ def _merge_and_write_datacube(
                 reprojected=False,
             )
             with dask.config.set(scheduler='synchronous'):
-                ds_out.to_netcdf(out_path)
+                ds_out.to_netcdf(out_path, encoding={vi: {'zlib': True, 'complevel': 4}})
             n_y = info['da'].sizes.get('y', 0)
             n_x = info['da'].sizes.get('x', 0)
             n_t = info['da'].sizes.get('time', 0)
@@ -485,7 +583,7 @@ def _merge_and_write_datacube(
     )
 
     with dask.config.set(scheduler='synchronous'):
-        ds_out.to_netcdf(out_path)
+        ds_out.to_netcdf(out_path, encoding={vi: {'zlib': True, 'complevel': 4}})
 
     n_y = merged_da.sizes.get('y', 0)
     n_x = merged_da.sizes.get('x', 0)

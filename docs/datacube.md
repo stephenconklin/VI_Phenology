@@ -36,11 +36,17 @@ All input variables (`NETCDF_DIR`, `VI`, `SHAPEFILE`, `SHAPEFILE_FIELD`,
 
 ## Processing Model
 
-Extraction runs in two phases:
+Extraction runs in three stages:
 
 ```
+Pre-filter (main process, sequential)
+  For each tile in --netcdf-dir:
+    Read x/y coordinate min/max only (4 scalar values, no data decompression)
+    Reproject ROI bounding box to tile CRS → bounding-box intersection test
+    Exclude non-overlapping tiles before any worker is spawned
+
 Phase 1 — Parallel tile extraction
-  For each overlapping tile:
+  For each bbox-passing tile:
     Open NetCDF → clip to polygon boundary → apply valid-range mask → write temp file
 
 Phase 2 — Merge and write (main process)
@@ -51,8 +57,25 @@ Phase 2 — Merge and write (main process)
 Cleanup — temp files deleted (always, even on error)
 ```
 
+The pre-filter is a conservative bounding-box test — tiles that intersect the bbox but
+not the exact polygon geometry are still passed to workers, which handle them via the
+normal `NoDataInBounds` path. For typical LVIS flight boxes that overlap only 1–2 of
+the 15 tiles in the NetCDF directory, the pre-filter reduces worker dispatch from 15
+tiles to 1–3, significantly reducing Phase 1 I/O contention on the source drive.
+
 Temp files are stored in `{output_dir}/{region_label}/_tmp/` and are always removed
 after Phase 2 completes, whether it succeeded or failed.
+
+**Temp file compression:** Temp files are written **without zlib compression**. They are
+written once by Phase 1 workers, read once by Phase 2, then deleted — compression would
+add substantial CPU overhead (especially with `dask scheduler='synchronous'` on an
+external drive) for no lasting benefit. Final output datacubes use `zlib complevel=4`.
+
+**Temp disk space:** Temp files are uncompressed float32, so peak additional disk usage
+during a region's processing is approximately:
+`n_overlapping_tiles × clipped_y × clipped_x × n_time_steps × 4 bytes`
+For typical LVIS flight boxes (1–3 overlapping tiles, clips much smaller than full tiles)
+this is usually 2–15 GB. Ensure `--output-dir` has sufficient free space.
 
 ---
 
@@ -147,7 +170,7 @@ Each output file is a CF-1.8 compliant netCDF4 with:
 - `x` — easting in meters (UTM)
 
 **Variables:**
-- `{VI}` — float32, dimensions `(time, y, x)`, NaN where no valid data
+- `{VI}` — float32, dimensions `(time, y, x)`, NaN where no valid data; zlib-compressed (level 4)
 - `spatial_ref` — scalar, CRS container variable (CF-1.8 grid mapping convention)
 
 **Global attributes:**
@@ -197,10 +220,34 @@ python src/netcdf_datacube_extract.py --help
 
 ## Notes on CRS Detection
 
-CRS comparison uses `pyproj.CRS.from_wkt(wkt).to_epsg()` rather than raw WKT string
-comparison. EPSG integer comparison is more robust — two WKT strings that represent the
-same CRS may differ in formatting or authority prefix. When `to_epsg()` cannot resolve
-a WKT to an EPSG code, the raw WKT string is used as the group key.
+CRS comparison uses `pyproj.CRS.from_wkt(wkt).to_epsg(min_confidence=20)` rather than
+raw WKT string comparison. EPSG integer comparison is more robust — two WKT strings
+that represent the same CRS may differ in formatting or authority prefix.
+
+**HLS 2.0 CRS quirks:** Two separate issues affect HLS v2.0 source data.
+
+*Non-standard datum name:* HLS v2.0 GeoTIFFs (particularly Sentinel-2 S30 granules)
+embed `"Not specified (based on WGS 84 spheroid)"` rather than the official `"World
+Geodetic System 1984"` as the datum name. pyproj's default `to_epsg()` (min_confidence
+70) rejects these WKTs even though the CRS is functionally identical to EPSG:326xx or
+EPSG:327xx. Using `min_confidence=20` reliably resolves them to the correct EPSG integer
+so that same-UTM-zone tiles are always grouped together. When EPSG resolution fails even
+at `min_confidence=20`, the fallback is `crs_obj.name` (e.g., `"UTM Zone 34, Southern
+Hemisphere"`) rather than the raw WKT string — this prevents GDAL version differences
+from producing non-equal string keys and causing false cross-CRS grouping.
+
+*Southern hemisphere UTM convention:* HLS v2.0 GeoTIFFs for tiles south of the equator
+store coordinates using a UTM North zone (EPSG:326xx, false_northing=0) with negative
+northings, instead of the standard UTM South convention (EPSG:327xx,
+false_northing=10,000,000). This is corrected in `03_hls_netcdf_build.py` (HLS_VI_Pipeline
+step 03): when a northern UTM EPSG code is detected and the pixel y-centroid is negative,
+the CRS is replaced with the UTM South equivalent (EPSG + 100) and y-coordinates are
+shifted by +10,000,000 m before the NetCDF is written. NetCDF files produced by a
+corrected pipeline run carry EPSG:327xx CRS with positive northings (6–9 million m range).
+If you are using older NetCDF files that still carry the UTM North / negative-northing
+convention, all VI_Phenology spatial operations remain internally consistent (tile and ROI
+are projected in the same coordinate space), but output datacubes will carry the UTM North
+hemisphere label; rebuilding the source NetCDFs with step 03 fully resolves this.
 
 ---
 

@@ -70,10 +70,9 @@ Fix (in _extract_datacube_one_tile, after valid-range mask):
 - First non-NaN value at each (y, x) wins — preserves all valid pixels from all acquisitions
 - Result reassembled with xr.concat; fully lazy (no intermediate .compute())
 
-## Known Issues (from code review 2026-03-03)
-Critical:
-1. smooth.py S-G window can exceed n_bins when data is sparse → crash in savgol_filter
-2. metrics.py los_days typed as int but assigned np.nan — type inconsistency
+## Bug Fixed 2026-03-18
+`metrics.py` `write_combined_metrics()`: `from extract import _sanitize_label` → `from io_utils import sanitize_label`.
+Caused ImportError at runtime when `--shapefile-field` + `--metrics` both active.
 
 ## NetCDF Format (confirmed)
 - CRS: check `ds['spatial_ref'].attrs.get('crs_wkt')` first, then `attrs.get('spatial_ref')`
@@ -85,9 +84,19 @@ Critical:
 - Conda env: `vi_phenology` (Python 3.11)
 - NumPy 2.x: use `np.trapezoid` not `np.trapz`
 
-## Pending Upstream Fix
-See `memory/pending_upstream_fix.md` — fix needed in HLS_VI_Pipeline `src/03_hls_netcdf_build.py`
-line 268 to write authority-tagged WKT so `pyproj.CRS.to_epsg()` resolves in netcdf_datacube_extract.py.
+## HLS v2.0 CRS Quirks (fixed 2026-03-18 in HLS_VI_Pipeline)
+See `memory/pending_upstream_fix.md` for full details.
+
+**Southern hemisphere tiles stored as UTM North (now fixed upstream):** HLS v2.0 GeoTIFFs
+for tiles south of the equator embed EPSG:326xx (UTM North) with negative northings instead
+of the standard EPSG:327xx (UTM South, false_northing=10,000,000). `03_hls_netcdf_build.py`
+now detects and corrects this automatically (EPSG + 100, y + 10,000,000). Existing NetCDF
+files need to be regenerated with step 03 to carry the correct CRS.
+
+**Non-standard datum name (ongoing, handled in vi_phenology):** HLS v2.0 embeds
+`"Not specified (based on WGS 84 spheroid)"` as the datum name, causing `to_epsg(conf=70)`
+to return None. Both pipelines use `min_confidence=20` throughout; `crs_obj.name` is the
+fallback key (never raw WKT).
 
 ## Commit Style
 No `Co-Authored-By: Claude` trailers.
