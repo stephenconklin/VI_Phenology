@@ -3,11 +3,15 @@ __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
+*.so
 .Python
 *.egg-info/
+*.egg
 dist/
 build/
 .eggs/
+wheels/
+.pytest_cache/
 
 # Environments
 .env
@@ -22,17 +26,34 @@ venv/
 .ipynb_checkpoints/
 *.ipynb
 
+# Sphinx docs build
+docs/_build/
+
 # macOS
 .DS_Store
 .AppleDouble
 .LSOverride
+._*
+Icon\r
+.Spotlight-V100
+.Trashes
+.TemporaryItems
+.DocumentRevisions-V100
+.fseventsd
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
 
 # IDE
-VI_Phenology.code-workspace
+*.code-workspace
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
 
 # Data files (do not commit large datasets)
 *.nc
@@ -45,9 +66,15 @@ VI_Phenology.code-workspace
 *.shx
 *.prj
 *.cpg
+*.geojson
+*.fgb
+*.kml
+*.kmz
 
-# Output directories (commit structure, not content)
+# Pipeline outputs (go to --output-dir, not the repo)
 outputs/
-
-# Logs
+_tmp/
+*.csv
+*.png
+*.html
 *.log
