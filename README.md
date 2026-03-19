@@ -31,8 +31,9 @@ Extracts spatially aggregated ROI-mean time series and produces:
 
 ### netCDF datacube pipeline (`netcdf_datacube_extract.py`)
 
-Clips source tiles to polygon boundaries and delivers per-pixel CF-1.8 datacubes:
-- Preserves full spatial dimensions for downstream scientific analysis
+Clips source tiles to polygon boundaries and delivers per-pixel CF-1.8 datacubes (time × y × x):
+- Retains the full time axis across all tile acquisition dates — each pixel carries a complete VI time series
+- Preserves full spatial resolution for downstream per-pixel analysis (trend, anomaly, classification, etc.)
 - Same-CRS tiles mosaiced via a memory-bounded write loop (no resampling)
 - Cross-CRS tiles bilinearly reprojected to the dominant CRS before merging
 - CF-1.8 global attributes written to all output files
