@@ -50,7 +50,7 @@ Multiple VIs can be processed in a single run (`--vi NDVI EVI2 NIRv`).
 
 ### netCDF Datacube Pipeline
 - Per-pixel CF-1.8 compliant datacubes clipped to polygon boundaries
-- Same-CRS multi-tile merging: pixel-perfect `combine_first` mosaic — no resampling
+- Same-CRS multi-tile merging: pixel-perfect, memory-bounded mosaic — no resampling
 - Cross-CRS multi-tile merging: bilinear reprojection of minority tiles to dominant CRS before merge
 - Configurable per-tile or merged output via `MERGE_SAME_CRS` / `MERGE_CROSS_CRS`
 - Full CF-1.8 metadata: `Conventions`, `history`, `tiles`, `region`, `vi`, `target_crs`, `resampling_method`

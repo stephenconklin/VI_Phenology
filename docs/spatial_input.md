@@ -121,11 +121,12 @@ tile arrays. The merge strategy depends on the CRS relationships between tiles:
 #### Same UTM Zone (same CRS)
 
 Adjacent HLS MGRS tiles in the same UTM zone share an **identical 30-m pixel grid**.
-Tiles are mosaiced without resampling using `xarray.DataArray.combine_first()`:
+Tiles are mosaiced without resampling via a memory-bounded direct write loop:
 
-- First-wins for the ~163-pixel MGRS overlap zone at 30 m
 - Time union: the merged datacube covers all acquisition dates from all tiles
 - No resampling — pixel values are unmodified
+- The ~163-pixel MGRS overlap zone is filled by the last tile written (scientifically
+  equivalent to first-wins for co-acquired HLS pixels)
 
 **Enable/disable** in `run_phenology.sh`:
 
@@ -141,7 +142,7 @@ systems and cannot share a pixel grid without reprojection.
 
 The dominant CRS (the CRS group covering the most pixels within the polygon) is
 selected as the target. Minority tiles are bilinearly reprojected to the dominant CRS,
-then mosaiced via `combine_first`.
+then mosaiced via the same memory-bounded write loop.
 
 Bilinear reprojection between adjacent UTM zones introduces sub-pixel mixing comparable
 to the sensor point spread function — scientifically acceptable for VI analysis at 30 m.

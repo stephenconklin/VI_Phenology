@@ -87,19 +87,21 @@ number of CRS zones involved and selects the appropriate merge strategy.
 ### Same-CRS Tiles (polygon within one UTM zone)
 
 Adjacent HLS MGRS tiles in the same UTM zone share an **identical 30-m pixel grid**.
-No resampling is needed — tiles are mosaiced using `xarray.DataArray.combine_first()`:
+No resampling is needed — tiles are mosaiced via a memory-bounded direct write loop
+(one time step at a time, bounded to ~200 MB peak regardless of datacube size):
 
-- **First-wins** for pixels in the MGRS overlap zone (~163 pixels at 30 m)
 - **Time union**: the output datacube covers all acquisition dates from all tiles;
   pixels from tiles that have no data on a given date are NaN
 - **No resampling** — pixel values are unmodified
+- The ~163-pixel MGRS overlap zone is filled by the last tile written (scientifically
+  equivalent to first-wins for co-acquired HLS pixels in the overlap zone)
 
 ### Cross-CRS Tiles (polygon spans a UTM zone boundary)
 
 When a polygon crosses a UTM zone boundary, tiles are in different coordinate systems.
 The dominant CRS (the CRS group with the most total pixels within the polygon) is
 selected as the output CRS. Minority tiles are reprojected to the dominant CRS using
-**bilinear resampling**, then mosaiced via `combine_first`.
+**bilinear resampling**, then mosaiced via the same memory-bounded write loop.
 
 Bilinear reprojection between adjacent UTM zones introduces sub-pixel mixing comparable
 to the sensor point spread function — scientifically acceptable for VI analysis at 30 m.
