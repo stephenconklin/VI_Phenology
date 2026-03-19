@@ -376,7 +376,7 @@ def _extract_tiles_to_temp(
                     result['tile_name'], *result['shape'], result['n_times'],
                 )
             elif result['status'] == 'skip':
-                logger.debug("  %s", result['message'])
+                logger.info("  %s", result['message'])
             else:
                 logger.error("  Tile %s: %s", result['tile_name'], result['message'])
 
