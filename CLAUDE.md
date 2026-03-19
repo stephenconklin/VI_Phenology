@@ -97,7 +97,7 @@ Clips CF-1.8 VI NetCDF files to polygon boundaries and delivers per-pixel
 CF-1.8 compliant datacubes — preserving the full spatial dimension for
 downstream scientific analysis:
 - One merged datacube per region (default) or one file per tile
-- Same-CRS tiles: mosaiced without resampling (`combine_first`, first-wins for overlap zone)
+- Same-CRS tiles: mosaiced without resampling via direct `netCDF4-python` write loop (memory-bounded)
 - Cross-CRS tiles: minority tiles bilinearly reprojected to the dominant CRS before merging
 - CF-1.8 global attributes: `Conventions`, `history`, `tiles`, `region`, `vi`,
   `target_crs`, `resampling_method` (when reprojection occurs)
@@ -137,8 +137,8 @@ Phase 2 (main process)
   Group tiles by CRS
   Apply merge strategy:
     1 tile           → single file, native CRS
-    N tiles same CRS, merge_same_crs=True  → combine_first mosaic, no resampling
-    N tiles mixed CRS, merge_cross_crs=True → reproject minority tiles (bilinear) + combine_first
+    N tiles same CRS, merge_same_crs=True  → _write_mosaic_nc4 (nc4 write loop), no resampling
+    N tiles mixed CRS, merge_cross_crs=True → reproject minority tiles (bilinear) + _write_mosaic_nc4
     otherwise        → one file per tile, native CRS
   Write final datacube(s)
    ↓
@@ -151,8 +151,8 @@ Cleanup (try/finally — runs even if Phase 2 raises)
 | Condition | Behavior | Output |
 |---|---|---|
 | 1 tile | Direct file write, native CRS | 1 file |
-| N tiles, same CRS, `MERGE_SAME_CRS=true` | `combine_first` mosaic, no resampling | 1 file |
-| N tiles, mixed CRS, `MERGE_CROSS_CRS=true` | Bilinear reproject minority → `combine_first` | 1 file |
+| N tiles, same CRS, `MERGE_SAME_CRS=true` | `_write_mosaic_nc4` write loop, no resampling | 1 file |
+| N tiles, mixed CRS, `MERGE_CROSS_CRS=true` | Bilinear reproject minority → `_write_mosaic_nc4` | 1 file |
 | `MERGE_SAME_CRS=false` | One file per tile, native CRS | N files |
 | `MERGE_CROSS_CRS=false` | One file per tile, native CRS, no reprojection | N files |
 
@@ -312,8 +312,9 @@ upstream in `03_hls_netcdf_build.py` of HLS_VI_Pipeline:
    this fully.
 
 For same-CRS merges: adjacent HLS MGRS tiles in the same UTM zone share an **identical 30-m
-pixel grid** — no resampling is needed. `combine_first` is first-wins for the ~163-pixel
-MGRS overlap zone and provides time union across all tile acquisition dates.
+pixel grid** — no resampling is needed. `_write_mosaic_nc4` uses last-written-wins for the
+~163-pixel MGRS overlap zone (scientifically equivalent to first-wins for co-acquired pixels)
+and provides time union across all tile acquisition dates.
 
 For cross-CRS merges: bilinear reprojection between adjacent UTM zones introduces sub-pixel
 mixing comparable to the sensor point spread function — scientifically acceptable for VI
@@ -340,39 +341,62 @@ This is critical — without it, each worker spawns its own dask thread pool, ca
 workers to compete for the same cores and eliminating the parallelism benefit.
 
 ### Memory-Safe NetCDF Chunking
-All `xr.open_dataset()` calls use `chunks={}` to use the file's native chunk layout.
-With `dask.config.set(scheduler='synchronous')`, dask processes one native chunk at a time
-sequentially, keeping peak memory bounded at the native chunk size × the spatial footprint.
 
-Do NOT use `chunks={'time': 1}` — if the file's native time chunks are larger than 1,
-xarray must decompress the full native chunk just to extract a single time step, causing
+**Phase 1 workers** (`_extract_datacube_one_tile`): open source files with `chunks={}` to
+use the file's native HDF5 chunk layout. With `dask.config.set(scheduler='synchronous')`,
+dask processes one native chunk at a time, keeping peak memory bounded at native chunk
+size × spatial footprint. Do NOT use `chunks={'time': 1}` here — if native time chunks
+are larger than 1, xarray must decompress the full native chunk per time step, causing
 severe I/O amplification.
+
+**Phase 2 (`_write_mosaic_nc4`)**: re-opens each temp file with
+`chunks={'time': _PHASE2_READ_CHUNK}` (default 20). This overrides the native chunk
+layout so exactly 20 time steps are decompressed per dask compute call, bounding peak
+memory to `~_PHASE2_READ_CHUNK × tile_ny × tile_nx × 4 B` (~190 MB for the largest
+BioSCape tiles). The `chunks={}` convention is intentionally NOT used here — for temp
+files with large or contiguous native chunks, `chunks={}` would produce a single giant
+dask chunk that materialises the full DataArray into memory, causing swap thrash.
 
 ### Datacube Temp File Strategy
 Phase 1 workers write to `{output_dir}/{region_label}/_tmp/{VI}_{tile_id}_clip.nc`.
 Workers return only small status dicts — they never return DataArrays across the process
 boundary. This keeps inter-process communication cheap regardless of datacube size.
-Phase 2 opens temp files lazily (`chunks={}`), performs the merge, and writes the final
-output. `_cleanup_temps()` is called in a `try/finally` block to guarantee temp directory
-removal even if Phase 2 raises an exception.
+
+Phase 2 (`_write_mosaic_nc4`) re-opens each temp file with explicit time chunking,
+builds the union y/x/time coordinate arrays, creates the output file via `nc4.Dataset`,
+and writes one time step at a time per tile using simple integer + slice indexing.
+`_cleanup_temps()` is called in a `try/finally` block to guarantee temp directory removal
+even if Phase 2 raises an exception.
 
 Temp files are written **without compression** — they are written once, read once by
 Phase 2, then deleted. Compression would add significant CPU overhead for no lasting
-benefit, particularly on external drives with `scheduler='synchronous'`.
-Final output datacubes use `complevel=4` — VI data compresses well (NaN-heavy,
-spatially smooth) and typically yields 5–10× size reduction vs. uncompressed NetCDF4.
+benefit, particularly on external drives.
+Final output datacubes use `zlib=True, complevel=4` (set via `nc4.createVariable`) —
+VI data compresses well (NaN-heavy, spatially smooth) and typically yields 5–10× size
+reduction vs. uncompressed NetCDF4. HDF5 `chunksizes=(1, ny, nx)` gives one complete
+2-D spatial layer per chunk — efficient for both write (one step at a time) and
+downstream `xr.open_dataset(chunks={})` reads.
 
 ## Key Implementation Notes
 
 ### NetCDF Output Compression
-All `to_netcdf()` calls in `netcdf_datacube_extract.py` must include an `encoding` dict:
+
+**Phase 1 temp files** (`_extract_datacube_one_tile`): written via xarray `to_netcdf(temp_path)`
+with **no encoding** — uncompressed, written once, read once by Phase 2, then deleted.
+Compression here would add CPU overhead with no lasting benefit.
+
+**Final output datacubes** (`_write_mosaic_nc4` and per-tile path): compression is set
+directly on the `nc4.createVariable` call (merged path) or via xarray encoding (per-tile path):
 ```python
-encoding={vi: {'zlib': True, 'complevel': 4}}   # final output
-encoding={vi: {'zlib': True, 'complevel': 1}}   # Phase 1 temp files
+# Merged output — via nc4.Dataset.createVariable:
+nc4.createVariable(vi, 'f4', ..., zlib=True, complevel=4, chunksizes=(1, ny, nx))
+
+# Per-tile output — via xarray to_netcdf encoding:
+encoding={vi: {'zlib': True, 'complevel': 4}}
 ```
-Do NOT call `to_netcdf()` without `encoding` — xarray's default is uncompressed NetCDF4,
-which produces files orders of magnitude larger than necessary (e.g. a 853×4611 px,
-1465-step datacube would be ~23 GB uncompressed vs. ~2–5 GB compressed).
+Do NOT call `to_netcdf()` without `encoding` on the per-tile path — xarray's default is
+uncompressed NetCDF4, which produces files orders of magnitude larger than necessary
+(e.g. a 853×4611 px, 1465-step datacube would be ~23 GB uncompressed vs. ~2–5 GB compressed).
 
 ### NumPy 2.x Compatibility
 Use `np.trapezoid` (not `np.trapz`, which was removed in NumPy 2.0). The conda env
