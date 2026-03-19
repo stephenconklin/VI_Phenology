@@ -12,10 +12,10 @@
 #
 #   Same CRS, merge enabled (default):
 #     Adjacent HLS MGRS tiles in the same UTM zone share an identical 30-m pixel
-#     grid — they are aligned at the pixel level. Tiles are mosaiced directly
-#     using DataArray.combine_first(): first-wins for the overlap zone, time union
-#     for the full time dimension. No resampling — pixel values are unmodified.
-#     Output: one CF-1.8 netCDF per region.
+#     grid — they are aligned at the pixel level. Tiles are mosaiced via a
+#     direct netCDF4-python write loop (one HDF5 chunk per time step), keeping
+#     peak memory bounded regardless of datacube size. No resampling — pixel
+#     values are unmodified. Output: one CF-1.8 netCDF per region.
 #
 #   Cross-CRS, merge enabled (default):
 #     Tiles spanning different UTM zones cannot share a pixel grid. Minority tiles
@@ -45,11 +45,12 @@ import shutil
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
-from functools import reduce
 from pathlib import Path
 from typing import Optional
 
 import geopandas as gpd
+import netCDF4 as nc4
+import numpy as np
 import pandas as pd
 import xarray as xr
 import rioxarray  # noqa: F401 — activates .rio accessor
@@ -64,6 +65,12 @@ from io_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Number of time steps read from each temp file per iteration during Phase 2
+# merge.  Bounds peak memory to roughly:
+#   _PHASE2_READ_CHUNK × tile_ny × tile_nx × 4 bytes
+# e.g. 20 × 994 × 2404 × 4 B ≈ 190 MB for the largest BioSCape tiles.
+_PHASE2_READ_CHUNK = 20
 
 try:
     from rioxarray.exceptions import NoDataInBounds
@@ -377,6 +384,298 @@ def _extract_tiles_to_temp(
 
 
 # ---------------------------------------------------------------------------
+# Phase 2 helpers
+# ---------------------------------------------------------------------------
+
+def _write_mosaic_nc4(
+    tile_write_infos: list,
+    dominant_wkt: str,
+    ref_y: float,
+    ref_x: float,
+    vi: str,
+    region_label: str,
+    out_path: Path,
+    vmin: float,
+    vmax: float,
+    reprojected_any: bool,
+    target_crs_label: str,
+    all_tile_ids: list,
+) -> tuple:
+    """Write a merged multi-tile datacube via a direct netCDF4-python write loop.
+
+    Replaces the former ``xarray.DataArray.combine_first + to_netcdf`` approach,
+    which materialised the full spatial-union DataArray (potentially 30+ GB for
+    large multi-tile regions) before writing a single byte.
+
+    This function reads at most ``_PHASE2_READ_CHUNK`` time steps × one tile's
+    spatial footprint at a time, keeping peak memory bounded to a few hundred MB
+    regardless of datacube size or number of tiles.
+
+    Mosaic semantics
+    ----------------
+    Tiles are written in order (``tile_write_infos[0]`` first).  Where two tiles
+    share the same time step and spatial position (the ~163-pixel MGRS overlap
+    zone), the **last-written tile wins**.  The former ``combine_first`` gave
+    first-wins; for co-acquired HLS pixels in the overlap zone the values are
+    effectively identical, so the distinction is not scientifically meaningful.
+
+    HDF5 chunk layout
+    -----------------
+    ``chunksizes=(1, ny, nx)``: one complete 2-D spatial layer per HDF5 chunk.
+    Downstream ``xr.open_dataset(chunks={})`` therefore produces one dask chunk
+    per time step — the natural access pattern for both the phenology pipeline
+    and per-time-step analysis.  For the first tile written, each HDF5 chunk
+    starts empty (fill_value) and is written fresh (no read-modify-write
+    overhead).  For subsequent tiles that share the same time step in the overlap
+    zone, HDF5 reads the existing chunk, splices in the new spatial slice, and
+    re-compresses — this is unavoidable but affects only the small overlap zone.
+
+    Args:
+        tile_write_infos : list of dicts, each containing:
+            ``tile_id``        str   — MGRS tile identifier.
+            ``da``             xr.DataArray — in dominant CRS (reprojected if
+                               needed); used for coordinate mapping only.
+            ``temp_path``      Path  — Phase 1 temp file, re-opened with
+                               explicit time chunking for the actual data read.
+            ``needs_reproject`` bool — whether to re-apply bilinear reprojection
+                               when re-opening the temp file inside this function.
+            ``src_wkt``        str  — original CRS WKT of the temp file
+                               (needed to attach CRS before reprojection).
+        dominant_wkt     : WKT of the output (dominant) CRS.
+        ref_y, ref_x     : coordinate of the dominant tile's first y/x pixel,
+                           used as the snapping reference for cross-CRS tiles.
+        vi               : variable name (e.g. 'NDVI').
+        region_label     : human-readable region name for CF attributes.
+        out_path         : destination file path.
+        vmin, vmax       : valid_range for CF variable attributes.
+        reprojected_any  : True if any tile was bilinearly reprojected.
+        target_crs_label : e.g. 'EPSG:32734'; written to global attrs when
+                           ``reprojected_any`` is True.
+        all_tile_ids     : source tile IDs in declaration order, for 'tiles'
+                           global attribute.
+
+    Returns:
+        (n_t, n_y, n_x) — the dimension sizes of the file that was written.
+    """
+    import rasterio.enums
+    from pyproj import CRS as ProjCRS
+
+    # ── 1. Build union coordinate arrays ────────────────────────────────────
+    # For same-CRS tiles: all coords are exact 30-m UTM multiples sharing an
+    # identical grid — np.unique is lossless.
+    # For cross-CRS tiles (post-reproject): bilinear reprojection can shift
+    # pixel centres by a sub-metre amount relative to the dominant grid.  We
+    # snap those coords to the nearest 30-m grid point (aligned to the dominant
+    # tile's coordinate origin) so that the union grid is regular and both tiles
+    # index cleanly into it without sub-pixel seams.
+
+    def _snap(coords: np.ndarray, ref: float, res: float = 30.0) -> np.ndarray:
+        """Round coords to the nearest multiple of res anchored at ref."""
+        return np.round((coords - ref) / res) * res + ref
+
+    all_y_raw = np.concatenate([info['da'].y.values for info in tile_write_infos])
+    all_x_raw = np.concatenate([info['da'].x.values for info in tile_write_infos])
+    all_t_raw = np.concatenate([info['da'].time.values for info in tile_write_infos])
+
+    union_y = np.sort(np.unique(_snap(all_y_raw, ref_y)))[::-1]  # descending N→S
+    union_x = np.sort(np.unique(_snap(all_x_raw, ref_x)))        # ascending  W→E
+    union_t = np.sort(np.unique(all_t_raw))                       # chronological
+
+    ny, nx, nt = len(union_y), len(union_x), len(union_t)
+
+    # time → integer days since 1970-01-01 (CF-1.8 convention)
+    epoch    = pd.Timestamp('1970-01-01')
+    time_days = (pd.DatetimeIndex(union_t) - epoch).days.values.astype(np.int32)
+
+    # ── 2. Resolve grid_mapping_name from the dominant CRS WKT ──────────────
+    try:
+        _grid_map = ProjCRS.from_wkt(dominant_wkt).to_cf().get(
+            'grid_mapping_name', 'transverse_mercator'
+        )
+    except Exception:
+        _grid_map = 'transverse_mercator'
+
+    # ── 3. Create output netCDF4 file and write coordinates / metadata ───────
+    # chunksizes=(1, ny, nx): one complete 2-D raster layer per HDF5 chunk.
+    # This matches the read pattern of downstream xr.open_dataset(chunks={})
+    # and eliminates partial-chunk writes for the first tile (fresh empty chunks
+    # are cheaper to write than read-modify-write on existing chunks).
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with nc4.Dataset(str(out_path), 'w', format='NETCDF4') as dst:
+
+        # Dimensions
+        dst.createDimension('time', nt)
+        dst.createDimension('y', ny)
+        dst.createDimension('x', nx)
+
+        # time variable
+        tv = dst.createVariable('time', 'i4', ('time',))
+        tv[:] = time_days
+        tv.units     = 'days since 1970-01-01'
+        tv.standard_name = 'time'
+        tv.calendar  = 'proleptic_gregorian'
+        tv.axis      = 'T'
+
+        # y (northing)
+        yv = dst.createVariable('y', 'f8', ('y',))
+        yv[:] = union_y
+        yv.units         = 'metre'
+        yv.standard_name = 'projection_y_coordinate'
+        yv.long_name     = 'Northing'
+        yv.axis          = 'Y'
+
+        # x (easting)
+        xv = dst.createVariable('x', 'f8', ('x',))
+        xv[:] = union_x
+        xv.units         = 'metre'
+        xv.standard_name = 'projection_x_coordinate'
+        xv.long_name     = 'Easting'
+        xv.axis          = 'X'
+
+        # spatial_ref (CF-1.8 grid mapping variable)
+        crv = dst.createVariable('spatial_ref', 'i4')
+        crv[:] = np.int32(0)
+        crv.crs_wkt          = dominant_wkt
+        crv.spatial_ref      = dominant_wkt   # legacy GDAL / rioxarray compat
+        crv.grid_mapping_name = _grid_map
+        crv.long_name        = 'CRS definition'
+
+        # VI data variable — zlib + complevel=4 matches current final-output
+        # convention; fill_value=NaN used throughout the phenology pipeline.
+        # chunksizes: one complete 2-D layer per HDF5 chunk (see docstring).
+        vi_var = dst.createVariable(
+            vi, 'f4', ('time', 'y', 'x'),
+            zlib=True, complevel=4,
+            fill_value=np.float32(np.nan),
+            chunksizes=(1, ny, nx),
+        )
+        vi_var.long_name   = f'{vi} vegetation index'
+        vi_var.valid_min   = float(vmin)
+        vi_var.valid_max   = float(vmax)
+        vi_var.grid_mapping = 'spatial_ref'
+
+        # Global CF-1.8 attributes
+        history = (
+            f"Created {datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')} "
+            f"by netcdf_datacube_extract.py; "
+            f"clipped to region='{region_label}', "
+            f"valid_range=[{vmin}, {vmax}]"
+        )
+        if reprojected_any:
+            history += (
+                f"; minority tiles reprojected to {target_crs_label} "
+                "via bilinear resampling"
+            )
+        dst.Conventions = 'CF-1.8'
+        dst.history     = history
+        dst.tiles       = ', '.join(all_tile_ids)
+        dst.region      = region_label
+        dst.vi          = vi
+        if reprojected_any:
+            dst.resampling_method = 'bilinear'
+            dst.target_crs        = target_crs_label
+
+        # ── 4. Write tile data — time-chunk by time-chunk ───────────────────
+        #
+        # For each tile we:
+        #   a) Re-open the Phase 1 temp file with chunks={'time': _PHASE2_READ_CHUNK}
+        #      so dask fetches exactly that many time steps per compute() call.
+        #   b) Re-apply bilinear reprojection if required (lazy; only the
+        #      current _PHASE2_READ_CHUNK steps are computed at once).
+        #   c) Snap the tile's y/x coords to the union grid and locate its
+        #      position with np.searchsorted — O(log n), exact for same-CRS
+        #      tiles, snap-corrected for reprojected tiles.
+        #   d) Locate each of the tile's time steps in union_t (searchsorted).
+        #   e) Read _PHASE2_READ_CHUNK steps at a time (.values triggers compute),
+        #      then write each step individually using integer + slice indexing —
+        #      the simplest, most transparent write path supported by netCDF4-python.
+        #
+        # Peak memory per iteration ≈ _PHASE2_READ_CHUNK × tile_ny × tile_nx × 4 B.
+
+        for info in tile_write_infos:
+            tile_id      = info['tile_id']
+            temp_path    = info['temp_path']
+            needs_repr   = info['needs_reproject']
+            src_wkt      = info['src_wkt']
+
+            # Re-open with explicit time chunking (avoids loading entire temp
+            # file when slicing — critical for large contiguous HDF5 layouts).
+            with xr.open_dataset(temp_path,
+                                  chunks={'time': _PHASE2_READ_CHUNK}) as ds_tile:
+                da_tile = ds_tile[vi]
+
+                if needs_repr:
+                    da_tile = da_tile.rio.write_crs(src_wkt)
+                    da_tile = da_tile.rio.reproject(
+                        dominant_wkt,
+                        resampling=rasterio.enums.Resampling.bilinear,
+                    )
+
+                # Snap tile coords to union grid and find integer positions.
+                tile_y_snapped = _snap(da_tile.y.values, ref_y)
+                tile_x_snapped = _snap(da_tile.x.values, ref_x)
+                tile_times     = da_tile.time.values
+                tile_ny        = len(tile_y_snapped)
+                tile_nx        = len(tile_x_snapped)
+                n_tile_t       = len(tile_times)
+
+                # y is descending in union_y; negate both arrays so searchsorted
+                # operates on an ascending sequence (correct for all UTM zones).
+                y_idx = np.searchsorted(-union_y, -tile_y_snapped)
+                x_idx = np.searchsorted(union_x,   tile_x_snapped)
+
+                # Guard: indices must be contiguous for axis-aligned HLS tiles.
+                # Non-contiguous indices indicate a grid-alignment bug and would
+                # silently produce a corrupt mosaic — raise instead.
+                if tile_ny > 1 and not np.all(np.diff(y_idx) == 1):
+                    raise ValueError(
+                        f"Tile {tile_id}: y-indices in union grid are non-contiguous "
+                        f"(unique diffs: {np.unique(np.diff(y_idx)).tolist()}). "
+                        "Expected contiguous for axis-aligned HLS tiles — "
+                        "check coordinate snapping or CRS alignment."
+                    )
+                if tile_nx > 1 and not np.all(np.diff(x_idx) == 1):
+                    raise ValueError(
+                        f"Tile {tile_id}: x-indices in union grid are non-contiguous "
+                        f"(unique diffs: {np.unique(np.diff(x_idx)).tolist()}). "
+                        "Expected contiguous for axis-aligned HLS tiles — "
+                        "check coordinate snapping or CRS alignment."
+                    )
+
+                y_start = int(y_idx[0])
+                x_start = int(x_idx[0])
+                y_end   = y_start + tile_ny
+                x_end   = x_start + tile_nx
+
+                # Locate each of this tile's time steps in the union time axis.
+                t_global = np.searchsorted(union_t, tile_times)
+
+                logger.info(
+                    "    Writing tile %s → union y[%d:%d] x[%d:%d], %d steps",
+                    tile_id, y_start, y_end, x_start, x_end, n_tile_t,
+                )
+
+                # Read and write in time chunks of _PHASE2_READ_CHUNK.
+                # Sequential reads from the temp file are efficient on both
+                # local and external drives; writing one step at a time keeps
+                # the nc4 indexing simple and avoids numpy broadcast overhead.
+                for t_start_local in range(0, n_tile_t, _PHASE2_READ_CHUNK):
+                    t_end_local = min(t_start_local + _PHASE2_READ_CHUNK, n_tile_t)
+
+                    # Triggers dask compute for exactly this time window.
+                    chunk = da_tile.isel(
+                        time=slice(t_start_local, t_end_local)
+                    ).values  # shape: (chunk_t, tile_ny, tile_nx), dtype float32
+
+                    for dt in range(t_end_local - t_start_local):
+                        t_out = int(t_global[t_start_local + dt])
+                        vi_var[t_out, y_start:y_end, x_start:x_end] = chunk[dt]
+
+    return nt, ny, nx
+
+
+# ---------------------------------------------------------------------------
 # Phase 2: merge temp files and write final datacube(s)
 # ---------------------------------------------------------------------------
 
@@ -396,14 +695,16 @@ def _merge_and_write_datacube(
 
     Merge decisions:
       1 tile              → single file, native CRS (no merge step)
-      N tiles, same CRS, merge_same_crs=True  → combine_first mosaic, one file
-      N tiles, mixed CRS, merge_cross_crs=True → reproject + combine_first, one file
+      N tiles, same CRS, merge_same_crs=True  → _write_mosaic_nc4, one file
+      N tiles, mixed CRS, merge_cross_crs=True → reproject + _write_mosaic_nc4, one file
       otherwise           → one file per tile, native CRS, no reprojection
 
-    combine_first mosaic:
-      - First-wins for pixels in the MGRS overlap zone (~163 px at 30 m)
+    Mosaic write (_write_mosaic_nc4):
+      - Reads _PHASE2_READ_CHUNK time steps at a time per tile; memory-bounded
       - Time union: NaN where a tile has no acquisition on a given date
       - No resampling for same-CRS tiles (pixel-perfect alignment)
+      - Last-written tile wins for the MGRS overlap zone (~163 px at 30 m);
+        scientifically equivalent to first-wins for co-acquired HLS pixels
     """
     import dask
     import rasterio.enums
@@ -470,7 +771,7 @@ def _merge_and_write_datacube(
         reason = (
             f"all {n_tiles} tiles share the same CRS "
             f"({crs_label}) — "
-            "combine_first mosaic, no resampling"
+            "direct nc4 write loop mosaic, no resampling"
         )
     elif n_crs > 1 and merge_cross_crs:
         do_merge = True
@@ -530,64 +831,77 @@ def _merge_and_write_datacube(
     )
     dominant_info    = crs_groups[dominant_crs_key][0]
     dominant_wkt     = dominant_info['wkt']
-    dominant_sref    = dominant_info['spatial_ref']
     target_crs_label = (
         f"EPSG:{dominant_crs_key}"
         if isinstance(dominant_crs_key, int)
         else str(dominant_crs_key)[:60]
     )
 
-    # Build the list of DataArrays to mosaic.
-    # Tiles not in the dominant CRS group are reprojected first.
-    all_das: list = []
+    # Coordinate origin for snapping reprojected tiles to the dominant grid.
+    # For same-CRS tiles snapping is a mathematical no-op (all coords are
+    # already exact 30-m multiples sharing the same UTM origin).
+    ref_y = float(dominant_info['da'].y.values[0])
+    ref_x = float(dominant_info['da'].x.values[0])
+
+    # Build tile_write_infos — one entry per tile in mosaic order.
+    # For cross-CRS minority tiles, reproject lazily here to obtain the
+    # output coordinate arrays needed for union-grid computation.  The
+    # reprojection is re-applied (with explicit time chunking) inside
+    # _write_mosaic_nc4 for the actual data write.
+    tile_write_infos: list = []
     reprojected_tile_ids: list = []
     all_tile_ids: list = []
 
     for crs_key, group in crs_groups.items():
         for info in group:
             all_tile_ids.append(info['tile_id'])
-            if crs_key != dominant_crs_key:
+            needs_repr = (crs_key != dominant_crs_key)
+            if needs_repr:
                 logger.info(
                     "  Reprojecting tile %s (CRS %s → %s) via bilinear resampling",
                     info['tile_id'], info['crs_key'], target_crs_label,
                 )
-                da_repr = info['da'].rio.reproject(
+                # Lazy reproject — only coordinate arrays (.y/.x) are read
+                # here; VI data is not computed until the write loop below.
+                da_for_coords = info['da'].rio.reproject(
                     dominant_wkt,
                     resampling=rasterio.enums.Resampling.bilinear,
                 )
-                all_das.append(da_repr)
                 reprojected_tile_ids.append(info['tile_id'])
             else:
-                all_das.append(info['da'])
+                da_for_coords = info['da']
+
+            tile_write_infos.append({
+                'tile_id':        info['tile_id'],
+                'da':             da_for_coords,   # coordinates only; data read inside helper
+                'temp_path':      info['temp_path'],
+                'needs_reproject': needs_repr,
+                'src_wkt':        info['wkt'],      # original CRS for re-open + reproject
+            })
 
     reprojected_any = len(reprojected_tile_ids) > 0
 
-    # Mosaic using combine_first:
-    #   - Same-CRS tiles share an identical pixel grid — first-wins for the
-    #     MGRS overlap zone, no resampling involved.
-    #   - Time union: the merged array covers all timestamps from all tiles.
-    #     Pixels from tiles that have no data on a given date remain NaN.
-    logger.info("  Mosaicing %d DataArray(s) via combine_first ...", len(all_das))
-    merged_da = reduce(lambda a, b: a.combine_first(b), all_das)
-    merged_da = merged_da.rio.write_crs(dominant_wkt)
-
     out_path = out_region_dir / f"{vi}_{region_label}_datacube.nc"
-    ds_out = merged_da.to_dataset(name=vi)
-    ds_out['spatial_ref'] = dominant_sref
-    _apply_cf_attrs(
-        ds_out, vi, region_label,
-        tile_ids=all_tile_ids,
-        vmin=vmin, vmax=vmax,
-        reprojected=reprojected_any,
-        target_crs_label=target_crs_label if reprojected_any else "",
+
+    logger.info(
+        "  Writing mosaic: %d tile(s) → %s",
+        len(tile_write_infos), out_path.name,
+    )
+    n_t, n_y, n_x = _write_mosaic_nc4(
+        tile_write_infos = tile_write_infos,
+        dominant_wkt     = dominant_wkt,
+        ref_y            = ref_y,
+        ref_x            = ref_x,
+        vi               = vi,
+        region_label     = region_label,
+        out_path         = out_path,
+        vmin             = vmin,
+        vmax             = vmax,
+        reprojected_any  = reprojected_any,
+        target_crs_label = target_crs_label if reprojected_any else "",
+        all_tile_ids     = all_tile_ids,
     )
 
-    with dask.config.set(scheduler='synchronous'):
-        ds_out.to_netcdf(out_path, encoding={vi: {'zlib': True, 'complevel': 4}})
-
-    n_y = merged_da.sizes.get('y', 0)
-    n_x = merged_da.sizes.get('x', 0)
-    n_t = merged_da.sizes.get('time', 0)
     repr_note = (
         f", tiles {reprojected_tile_ids} bilinearly reprojected to {target_crs_label}"
         if reprojected_any else ""
