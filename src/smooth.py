@@ -182,6 +182,83 @@ def smooth_linear(obs_series: pd.Series) -> pd.Series:
     return result.astype(np.float32)
 
 
+def smooth_whittaker(obs_series: pd.Series, lam: float = 100.0) -> pd.Series:
+    """Apply Whittaker smoother to observation dates, then return a complete daily series.
+
+    Maps observations onto a daily grid with binary weights (1 = observed, 0 = gap),
+    then solves the penalised least-squares system:
+
+        (W + λ D^T D) z = W y
+
+    where W is the diagonal weight matrix, D is the 2nd-order difference matrix, and
+    λ controls smoothing strength.  Larger λ → smoother curve; typical range 10–1000.
+
+    Unlike Savitzky-Golay, Whittaker does not require uniform spacing before filtering —
+    it operates on the full daily grid and handles gaps natively via the weight vector.
+    This makes it especially well-suited to HLS's irregular revisit cadence.
+
+    Falls back to smooth_linear() when fewer than 3 daily grid points span the series
+    (the 2nd-order difference matrix degenerates for n < 3) or if the sparse solver
+    raises an exception.
+
+    Args:
+        obs_series: pd.Series with datetime index (observation dates only, no NaN).
+        lam:        Smoothing strength λ (default 100). Higher = smoother.
+
+    Returns:
+        pd.Series with datetime index covering all days (first obs → last obs).
+    """
+    from scipy.sparse import diags as sp_diags
+    from scipy.sparse.linalg import spsolve
+
+    first, last = obs_series.index[0], obs_series.index[-1]
+    daily_index = pd.date_range(first, last, freq='D')
+    n = len(daily_index)
+
+    if n < 3:
+        logger.warning(
+            "smooth_whittaker: series spans only %d day(s) — "
+            "falling back to linear interpolation", n,
+        )
+        return smooth_linear(obs_series)
+
+    # Build daily grid: y values and binary weights.
+    daily_y = np.zeros(n, dtype=np.float64)
+    daily_w = np.zeros(n, dtype=np.float64)
+    obs_offsets = (obs_series.index - first).days.values.astype(int)
+    daily_y[obs_offsets] = obs_series.values.astype(np.float64)
+    daily_w[obs_offsets] = 1.0
+
+    # 2nd-order difference matrix D of shape (n-2, n).
+    # Row i: [... 1, -2, 1 ...] at columns i, i+1, i+2.
+    e = np.ones(n)
+    D = sp_diags(
+        [e[:-2], -2 * e[:-1], e],
+        offsets=[0, 1, 2],
+        shape=(n - 2, n),
+        format='csc',
+    )
+
+    W = sp_diags(daily_w, format='csc')
+    A = W + lam * D.T @ D
+    b = daily_w * daily_y
+
+    try:
+        z = spsolve(A, b)
+    except Exception as exc:
+        logger.warning(
+            "smooth_whittaker: sparse solver failed (%s) — "
+            "falling back to linear interpolation", exc,
+        )
+        return smooth_linear(obs_series)
+
+    logger.debug(
+        "smooth_whittaker: %d obs on %d-day grid, λ=%.1f",
+        len(obs_series), n, lam,
+    )
+    return pd.Series(z.astype(np.float32), index=daily_index)
+
+
 def smooth_harmonic(obs_series: pd.Series, n_harmonics: int = 3) -> pd.Series:
     """Fit a harmonic (Fourier) model to the observation series, evaluate on daily axis.
 
@@ -332,6 +409,8 @@ def smooth_timeseries(raw: dict, config: PhenologyConfig) -> dict:
             smoothed = smooth_linear(obs_series)
         elif method == 'harmonic':
             smoothed = smooth_harmonic(obs_series)
+        elif method == 'whittaker':
+            smoothed = smooth_whittaker(obs_series, config.smooth_lambda)
         else:
             raise ValueError(f"Unknown smooth_method: {method!r}")
 

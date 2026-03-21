@@ -13,18 +13,34 @@ conda env create -f environment.yml
 conda activate vi_phenology
 ```
 
-## Two Pipelines — Overview
+## Three Pipelines — Overview
 
-This repository contains two independent processing pipelines, selected via the `PIPELINE`
+This repository contains three independent processing pipelines, selected via the `PIPELINE`
 variable in `run_phenology.sh`:
 
 | `PIPELINE` | Script | Purpose |
 |---|---|---|
-| `phenology` (default) | `src/vi_phenology.py` | ROI-mean time series, smoothing, metrics, plots |
+| `phenology` | `src/vi_phenology.py` | ROI-mean time series, smoothing, metrics, plots |
 | `netcdf_datacube` | `src/netcdf_datacube_extract.py` | Per-pixel CF-1.8 datacubes clipped to polygon regions |
+| `pixel_phenology` | `src/pixel_phenology_extract.py` | 18 per-pixel metric maps from existing datacubes |
 
-Both pipelines share the same `--netcdf-dir`, `--vi`, `--shapefile`, `--shapefile-field`,
-`--valid-range-*`, `--workers`, `--start-date`, `--end-date`, and `--no-logfile` inputs.
+The `phenology` and `netcdf_datacube` pipelines share the same `--netcdf-dir`, `--vi`,
+`--shapefile`, `--shapefile-field`, `--valid-range-*`, `--workers`, `--start-date`,
+and `--end-date` inputs.
+
+The `phenology` pipeline additionally supports `--input-datacubes` as an alternative to
+`--netcdf-dir` + `--shapefile`. When datacubes are provided, no tile discovery or spatial
+clipping is needed — VI and region_label are inferred from each filename
+(`{VI}_{region_label}_datacube.nc`). Use this for faster repeated runs (different smoothing,
+thresholds, or plots) after the `netcdf_datacube` pipeline has already produced the datacubes.
+`--input-datacubes` accepts individual file paths or a **directory path**; when a directory
+is given, all `*_datacube.nc` files found recursively within it are used. This matches the
+nested output layout of `netcdf_datacube` (`{output_dir}/{shapefile_stem}/{region_label}/`)
+so pointing at the shapefile subfolder picks up all regions automatically.
+
+The `pixel_phenology` pipeline takes `--input-datacubes` (paths to `*_datacube.nc` files
+produced by `netcdf_datacube`) as its primary input and does not use `--netcdf-dir` or
+shapefiles — the spatial clipping is already embedded in the datacube.
 
 ## Running the Tool
 
@@ -34,6 +50,7 @@ Edit the variables at the top and run `./run_phenology.sh`. Inline comments docu
 
 ### Phenology pipeline (direct CLI)
 
+**Standard mode** — discovers and clips source VI NetCDF tiles:
 ```bash
 python src/vi_phenology.py \
   --netcdf-dir /path/to/netcdfs \
@@ -48,9 +65,47 @@ python src/vi_phenology.py \
   --plot-style combined \
   --plot-format png html \
   --metrics \
+  --min-valid-obs 20 \
+  --min-valid-obs-per-year 5 \
+  --sample-pixels 500 \
+  --random-seed 42 \
+  --min-ndvi-mean 0.10 \
+  --min-quality-frac 0.0 \
   --workers 4 \
   --start-date 2022-01-01 \
   --end-date   2024-12-31
+```
+
+**Datacube mode** — reads pre-clipped datacubes (faster for repeated runs); accepts a
+directory (all `*_datacube.nc` files found recursively) or individual file paths:
+```bash
+# Directory — picks up all regions under the shapefile subfolder automatically:
+python src/vi_phenology.py \
+  --input-datacubes /path/to/outputs/LVIS_flightboxes_final \
+  --vi NDVI \
+  --valid-range-ndvi "-0.1,1.0" \
+  --output-dir ./outputs \
+  --smooth-method whittaker \
+  --smooth-lambda 100 \
+  --plot-style combined \
+  --plot-format png html \
+  --metrics \
+  --min-valid-obs 20 \
+  --min-valid-obs-per-year 5
+
+# Individual files:
+python src/vi_phenology.py \
+  --input-datacubes /path/to/NDVI_G5_1_datacube.nc /path/to/NDVI_G5_12_datacube.nc \
+  --vi NDVI \
+  --valid-range-ndvi "-0.1,1.0" \
+  --output-dir ./outputs \
+  --smooth-method whittaker \
+  --smooth-lambda 100 \
+  --plot-style combined \
+  --plot-format png html \
+  --metrics \
+  --min-valid-obs 20 \
+  --min-valid-obs-per-year 5
 ```
 
 Use `python src/vi_phenology.py --help` for the full argument reference.
@@ -72,13 +127,36 @@ python src/netcdf_datacube_extract.py \
 
 Use `python src/netcdf_datacube_extract.py --help` for the full argument reference.
 
+### Pixel phenology pipeline (direct CLI)
+
+Reads `*_datacube.nc` files produced by `netcdf_datacube_extract.py`. VI and region label
+are inferred from the filename (`{VI}_{region_label}_datacube.nc`).
+
+```bash
+python src/pixel_phenology_extract.py \
+  --input-datacubes /path/to/NDVI_MyRegion_datacube.nc \
+  --output-dir ./pixel_metrics \
+  --smooth-lambda 100 \
+  --min-valid-obs 20 \
+  --min-valid-obs-per-year 5 \
+  --peak-prominence 0.05 \
+  --peak-min-distance 45 \
+  --season-threshold 0.20 \
+  --valid-range-ndvi "-0.1,1.0" \
+  --workers 8 \
+  --start-date 2020-01-01 \
+  --end-date   2024-12-31
+```
+
+Use `python src/pixel_phenology_extract.py --help` for the full argument reference.
+
 ## Implementation Status
 
 All modules are **fully implemented**. The end-to-end pipeline runs successfully across
 all layers (extraction → smoothing → metrics → plots). No stubs remain.
 
-`netcdf_datacube_extract.py` is a standalone module — it does not depend on
-`PhenologyConfig` or any other phenology-pipeline module.
+`netcdf_datacube_extract.py` and `pixel_phenology_extract.py` are standalone modules —
+neither depends on `PhenologyConfig` or any other phenology-pipeline module.
 
 ## Project Purpose
 
@@ -86,7 +164,7 @@ all layers (extraction → smoothing → metrics → plots). No stubs remain.
 
 Reads CF-1.8 compliant VI NetCDF time-series files and produces per-region
 spatially aggregated time series:
-- ROI-mean aggregated time series (Parquet + observations CSV)
+- ROI-mean aggregated time series (observations CSV)
 - Smoothed gap-filled daily series
 - Phenological metrics tables (CSV)
 - Phenology plots (PNG static + HTML interactive)
@@ -101,6 +179,22 @@ downstream scientific analysis:
 - Cross-CRS tiles: minority tiles bilinearly reprojected to the dominant CRS before merging
 - CF-1.8 global attributes: `Conventions`, `history`, `tiles`, `region`, `vi`,
   `target_crs`, `resampling_method` (when reprojection occurs)
+
+### Pixel phenology pipeline (`pixel_phenology_extract.py`)
+
+Reads per-pixel datacubes (from `netcdf_datacube_extract.py`) and produces per-pixel
+phenological metric maps — one CF-1.8 NetCDF per (VI, region) with 18 metric bands:
+- Whittaker smoothing applied per-pixel (λ D^T D penalty matrix precomputed once per
+  datacube; all pixels share the same time axis)
+- 18 metrics per pixel: peak NDVI/DOY (mean+std), integrated NDVI (mean+std),
+  green-up rate, floor NDVI, ceiling NDVI, season length (mean+std), CV,
+  interannual peak range+std, n_peaks, peak separation, relative peak amplitude,
+  valley depth
+- Floor and ceiling NDVI derived directly from the annual smooth curve (no DOY windows)
+- Parallelised via `ThreadPoolExecutor` over y-row chunks; scipy sparse solver releases
+  GIL for true multi-core throughput
+- Outputs: `{VI}_{region_label}_pixel_metrics.nc` (compressed, CF-1.8) +
+  `{VI}_{region_label}_pixel_metrics_summary.csv` (spatial stats per metric)
 
 ## Architecture: Phenology Layered Output Design
 
@@ -158,6 +252,39 @@ Cleanup (try/finally — runs even if Phase 2 raises)
 
 Dominant CRS = the CRS group with the most total pixels (y × x) within the polygon.
 
+## Architecture: Pixel Phenology Pipeline
+
+```
+For each input datacube ({VI}_{region_label}_datacube.nc):
+   ↓
+Open with xarray (lazy); apply --start-date/--end-date filter on time axis
+Warn if uncompressed size > 8 GB
+Load full (time, y, x) array into numpy float32
+   ↓
+Precompute λ D^T D penalty matrix once (all pixels share the same n_days)
+   ↓
+ThreadPoolExecutor: dispatch y-row chunks (_Y_CHUNK_ROWS = 50 rows per chunk)
+   Each thread:
+     For each pixel in its y-row chunk:
+       Map valid obs onto daily grid (NaN → weight 0)
+       Solve (W + λ D^T D) z = W y  [Whittaker smooth]
+       Per year: peak, IVI, floor, ceiling, greenup_rate, season_length, bimodality
+       Aggregate: mean/std across years; CV from raw obs
+     Return (n_metrics, n_y_chunk, n_x) float32 array
+   ↓
+Assemble full (n_metrics, n_y, n_x) output array
+   ↓
+Write {VI}_{region_label}_pixel_metrics.nc  (CF-1.8, zlib complevel=4)
+Write {VI}_{region_label}_pixel_metrics_summary.csv  (mean, std, p05, p50, p95, n_valid_pixels)
+```
+
+**Threading rationale:** `scipy.sparse.linalg.spsolve` releases the GIL, so
+`ThreadPoolExecutor` achieves true multi-core parallelism while sharing the in-memory
+array without inter-process serialisation overhead.
+
+**Memory note:** The full (time, y, x) array is loaded once into RAM. For large datacubes,
+use `--start-date`/`--end-date` to reduce the time axis before loading.
+
 ## Pipeline Execution Model
 
 ### Phenology pipeline
@@ -165,16 +292,15 @@ Dominant CRS = the CRS group with the most total pixels (y × x) within the poly
 `vi_phenology.py` processes one region at a time. For each region:
 1. All configured VIs are extracted (Layers 0+1) → `region_raw` dict
 2. Smoothing applied (Layer 2) → `region_smoothed` dict
-3. Parquet written to disk (if `config.save_parquet`)
-4. Observations CSV written to disk (if `config.save_observations_csv`)
-5. Metrics computed and per-region CSV written to disk (if `config.compute_metrics`)
-6. Plots generated and written to disk (if any plot toggle is enabled)
-7. `region_raw` and `region_smoothed` go out of scope (GC-eligible)
-8. Next region begins
+3. Observations CSV written to disk (if `config.save_observations_csv`)
+4. Metrics computed and per-region CSV written to disk (if `config.compute_metrics`)
+5. Plots generated and written to disk (if any plot toggle is enabled)
+6. `region_raw` and `region_smoothed` go out of scope (GC-eligible)
+7. Next region begins
 
-Combined shapefile outputs (`write_combined_metrics`, `write_combined_parquet`,
-`write_combined_observations_csv`) wait until all regions are complete.
-These are gated by `config.save_combined_outputs` (for Parquet + observations CSV)
+Combined shapefile outputs (`write_combined_metrics`, `write_combined_observations_csv`)
+wait until all regions are complete.
+These are gated by `config.save_combined_outputs` (for observations CSV)
 and `config.compute_metrics` (for the metrics CSV).
 
 ### Output Toggles (phenology pipeline only)
@@ -184,9 +310,8 @@ All output types are enabled by default. Disable individually via CLI flags or
 
 | Config field | CLI flag | `run_phenology.sh` | Controls |
 |---|---|---|---|
-| `save_parquet` | `--no-parquet` | `SAVE_PARQUET=false` | Per-region Parquet time series |
 | `save_observations_csv` | `--no-observations-csv` | `SAVE_OBSERVATIONS_CSV=false` | Per-region observations CSV |
-| `save_combined_outputs` | `--no-combined-outputs` | `SAVE_COMBINED_OUTPUTS=false` | Combined shapefile Parquet + observations CSV |
+| `save_combined_outputs` | `--no-combined-outputs` | `SAVE_COMBINED_OUTPUTS=false` | Combined shapefile observations CSV |
 | `plot_annual` | `--no-plot-annual` | `PLOT_ANNUAL=false` | Annual DOY overlay plot |
 | `plot_timeseries` | `--no-plot-timeseries` | `PLOT_TIMESERIES=false` | Full calendar time-series plot |
 | `plot_anomaly` | `--no-plot-anomaly` | `PLOT_ANOMALY=false` | Anomaly (departure from mean) plot |
@@ -217,14 +342,15 @@ dicts; `smoothed` may be `None` when smooth_method is 'none'.
 
 | Module | Role |
 |--------|------|
-| `vi_phenology.py` | CLI entrypoint (argparse); streaming per-region phenology pipeline orchestration |
-| `phenology_config.py` | `PhenologyConfig` dataclass; built from parsed CLI args |
-| `extract.py` | Layers 0+1 — NetCDF discovery, region enumeration, spatial masking, ROI aggregation, daily reindex |
-| `smooth.py` | Layer 2 — gap-fill and smooth; smoothing-on-obs-dates-first strategy |
-| `metrics.py` | Layer 3 — SOS, POS, EOS, LOS, IVI, greening/senescence rates |
+| `vi_phenology.py` | CLI entrypoint (argparse); streaming per-region phenology pipeline orchestration; `_enumerate_datacube_regions()` for datacube input mode |
+| `phenology_config.py` | `PhenologyConfig` dataclass; built from parsed CLI args; `netcdf_dir` and `input_datacubes` are mutually exclusive optional fields |
+| `extract.py` | Layers 0+1 — NetCDF discovery, region enumeration, spatial masking, ROI aggregation, daily reindex; `aggregate_from_datacube()` for datacube input mode; pixel selection (Phase A: `_compute_pixel_stats_one_tile`, `select_pixel_sample`) |
+| `smooth.py` | Layer 2 — gap-fill and smooth; supports savgol, loess, linear, harmonic, whittaker |
+| `metrics.py` | Layer 3 — SOS, POS, EOS, LOS, IVI, greening/senescence rates + extended metrics (floor/ceiling, season length, bimodality, CV) |
 | `plot.py` | Matplotlib static (PNG) + Plotly interactive (HTML) phenology plots |
-| `io_utils.py` | Shared utilities: Parquet I/O, NetCDF file discovery, `sanitize_label`, `load_shapefile_regions`, `parse_valid_range`, `read_netcdf_crs`, `setup_log_file` |
+| `io_utils.py` | Shared utilities: observations CSV I/O, NetCDF file discovery, `sanitize_label`, `load_shapefile_regions`, `parse_valid_range`, `read_netcdf_crs`, `setup_log_file` |
 | `netcdf_datacube_extract.py` | Standalone CLI: per-pixel CF-1.8 datacube extraction with two-phase parallel tile processing and CRS-aware merge |
+| `pixel_phenology_extract.py` | Standalone CLI: per-pixel Whittaker smoothing + 18-metric extraction from datacubes; ThreadPoolExecutor over y-row chunks |
 
 ## Key Design Decisions
 
@@ -252,13 +378,29 @@ where `T = 365.25` days, `t` = day-of-year. Default `n_harmonics = 3`.
 | `loess` | LOESS/LOWESS | Adaptive to irregular spacing; `--smooth-window` |
 | `linear` | Linear interpolation | No smoothing, just gap-fill |
 | `harmonic` | Fourier/harmonic fit | Best for multi-year trend decomposition |
+| `whittaker` | Whittaker smoother | Penalised least-squares; `--smooth-lambda` (default 100); handles irregular HLS cadence natively without binning |
 | `none` | Skip Layer 2 | Only Layers 0+1 produced |
 
-### Parquet Schema
-One file per `(vi, region_label)`. See Inter-Module Data Contract above for column definitions.
+### Whittaker Smoother (`smooth_whittaker`)
+Solves `(W + λ D^T D) z = W y` where W is the diagonal observation-weight matrix
+(1 = observed, 0 = gap) and D is the 2nd-order difference matrix (penalises curvature).
+Unlike S-G, the full daily grid is the working domain — no binning to uniform spacing
+required. This makes it especially robust to HLS's variable revisit cadence and long
+cloud-gap periods.
+
+`--smooth-lambda` controls smoothing strength. Typical values:
+- `10–50`: tight, follows observations closely
+- `100` (default): balanced smoothing
+- `300–1000`: very smooth; appropriate for coarse biome-level characterisation
+
+`smooth_whittaker` follows the same obs-first API as other methods in `smooth.py`: takes
+an observation-date-only Series, returns a complete daily Series. Falls back to linear
+interpolation if n_days < 3 or the sparse solver fails.
 
 ### Phenological Metrics (Layer 3)
-Per year per region per VI:
+Per year per region per VI. The metrics CSV has one row per (vi, region, year).
+
+**Core metrics** (existing):
 - **SOS** — Start of Season: VI crosses `baseline + sos_threshold * amplitude` going up
 - **POS** — Peak of Season: date + value of annual maximum
 - **EOS** — End of Season: VI drops back through same threshold
@@ -267,6 +409,25 @@ Per year per region per VI:
 - **Greening rate** — `(VI_pos - VI_sos) / (pos_date - sos_date).days`
 - **Senescence rate** — `(VI_eos - VI_pos) / (eos_date - pos_date).days` (negative for declining)
 
+**Extended metrics** (added in feature/metrics_and_pixel_pipeline):
+- **floor_ndvi** — annual minimum of the smooth curve (dry-season trough, derived directly from curve)
+- **ceiling_ndvi** — annual maximum of the smooth curve (= pos_value; wet-season peak)
+- **season_length_days** — days above `floor + sos_threshold × amplitude`; uses actual dates (cross-year safe)
+- **greenup_rate** — `(ceiling − floor) / (peak_date − floor_date).days`; floor location from curve minimum
+- **n_peaks** — count of peaks detected by `scipy.signal.find_peaks` (prominence + distance thresholds)
+- **peak_separation_days** — calendar days between the two tallest peaks (NaN if n_peaks < 2)
+- **relative_peak_amplitude** — `min(h1,h2) / max(h1,h2)` ratio (NaN if n_peaks < 2)
+- **valley_depth** — normalised trough depth between peaks: `((h1+h2)/2 − valley) / ((h1+h2)/2)` (NaN if n_peaks < 2)
+- **cv** — coefficient of variation of raw (unsmoothed) observations across the **full** time series; same value on every year row for a given (vi, region)
+
+**Floor/ceiling design note:** floor and ceiling are computed from the annual smooth curve
+minimum and maximum — no biome-specific DOY windows are used or needed. This makes the
+pipeline self-calibrating across biomes (fynbos, savanna, grassland) without configuration.
+
+**Bimodality parameters** (only active when `--metrics` flag is set):
+- `--peak-prominence` (default 0.05): min NDVI prominence for a peak to be counted
+- `--peak-min-distance` (default 45): min separation in days between peaks
+
 `baseline = annual minimum; amplitude = peak - baseline`
 
 `compute_metrics()` returns the full `pd.DataFrame` of all rows. `vi_phenology.py` captures
@@ -274,6 +435,59 @@ this and passes it to `write_combined_metrics()`, which writes `{VI}_{shapefile_
 at the root of `output_dir` when `--shapefile-field` is set. Per-region CSVs are always written
 by `compute_metrics()` regardless. Dissolved shapefiles (field value `'none'`) are skipped by
 `write_combined_metrics()`.
+
+### Observation Count Thresholds (phenology + pixel_phenology)
+
+Two complementary thresholds gate metric computation at different granularities:
+
+| Parameter | CLI flag | `run_phenology.sh` | Applied in | Effect |
+|---|---|---|---|---|
+| `min_valid_obs` | `--min-valid-obs` | `MIN_VALID_OBS` / `PIXEL_MIN_VALID_OBS` | Phenology: `vi_phenology.py` main loop; Pixel: `_extract_pixel_metrics` | Skip region/pixel entirely if total obs < N |
+| `min_valid_obs_per_year` | `--min-valid-obs-per-year` | `MIN_VALID_OBS_PER_YEAR` / `PIXEL_MIN_VALID_OBS_PER_YEAR` | Phenology: `metrics.py compute_metrics()`; Pixel: `_extract_pixel_metrics` per-year loop | Skip individual annual window if obs < N; no NaN row written |
+
+Default values: `min_valid_obs=20`, `min_valid_obs_per_year=5`. Increase per-year threshold to 8–10 for stricter quality control in cloudy regions.
+
+For the phenology pipeline, `min_valid_obs` counts rows in the Layer 0 observation DataFrame (one row per observation date). For the pixel pipeline, it counts valid (non-NaN, in-range) timesteps in the per-pixel array.
+
+### Pixel Sampling — Phenology Pipeline Only
+
+Randomly samples a fixed set of N pixels once per (VI, region) and uses those same pixels consistently across the entire time series. Eliminates date-to-date variation in the spatial sample caused by cloud masking — different dates no longer use different pixel sets.
+
+**Two-phase architecture in `aggregate_across_tiles()`:**
+
+```
+Phase A  (select_pixel_sample — only when sampling/filtering is requested)
+  _compute_pixel_stats_one_tile workers (parallel, same ProcessPoolExecutor pattern):
+    Clip tile → apply valid range → compute per-pixel temporal NDVI sum + valid count
+    Return flat pixel list: (y_round, x_round, ndvi_sum, count)
+  Main process combines tiles, deduplicates by (y_round, x_round), computes:
+    mean_ndvi  = total_ndvi_sum / total_count
+    valid_frac = total_count / total_n_time
+  Apply filters: min_ndvi_mean, min_quality_frac
+  Draw N random pixels: np.random.default_rng(seed).choice(eligible_keys, N)
+  Returns: set of (y_round, x_round) tuples
+   ↓
+Phase B  (extraction — always runs)
+  _process_one_tile workers receive pixel_coords set
+  After valid-range masking, build 2D boolean pixel mask in O(N_sample) via dict lookup:
+    y_to_idx = {y: i for i, y in enumerate(y_arr)}
+    x_to_idx = {x: i for i, x in enumerate(x_arr)}
+    pixel_mask_2d[iy, ix] = True for each (y_r, x_r) in pixel_coords
+  Apply mask with xr.DataArray.where() before spatial aggregation
+```
+
+**Pixel coordinates:** rounded to 1 decimal place for reliable cross-tile matching. Same-CRS tiles share an identical 30-m grid, so coordinates are directly comparable. Cross-CRS tiles have incompatible coordinate spaces — pixels sampled from tile A (EPSG:32734) are silently absent from tile B (EPSG:32733), which degrades gracefully (tile B still contributes all its eligible pixels).
+
+**Parameters (phenology pipeline only):**
+
+| CLI flag | `run_phenology.sh` | Default | Effect |
+|---|---|---|---|
+| `--sample-pixels N` | `SAMPLE_PIXELS` (commented out) | None = all pixels | Number of pixels to randomly sample per region |
+| `--random-seed SEED` | `RANDOM_SEED` (commented out) | None = random | RNG seed for reproducible pixel samples |
+| `--min-ndvi-mean VAL` | `MIN_NDVI_MEAN` (commented out) | None = no filter | Exclude pixels below this temporal mean NDVI |
+| `--min-quality-frac FRAC` | `MIN_QUALITY_FRAC` (commented out) | None = no filter | Min fraction of valid timesteps for a pixel to be eligible |
+
+Phase A only runs when at least one of `n_sample`, `min_ndvi_mean`, or `min_quality_frac > 0` is set. When all are at defaults, extraction is identical to the original wall-to-wall approach.
 
 ### Valid Range Application
 Apply `--valid-range-{vi}` at extraction time (Layer 0 for phenology; Phase 1 worker for datacube),
@@ -454,8 +668,6 @@ One file per tile+VI: `T{TILE}_{VI}.nc` (HLS_VI_Pipeline naming convention)
 
 | Output | Pattern | Location |
 |--------|---------|----------|
-| Parquet time series | `{VI}_{region_label}_timeseries.parquet` | per-region subdirectory |
-| Combined shapefile Parquet | `{VI}_{shapefile_stem}_timeseries.parquet` | shapefile root folder |
 | Observations CSV | `{VI}_{region_label}_observations.csv` | per-region subdirectory |
 | Combined observations CSV | `{VI}_{shapefile_stem}_timeseries.csv` | shapefile root folder |
 | Per-region metrics CSV | `{VI}_{region_label}_metrics.csv` | per-region subdirectory |
@@ -475,6 +687,17 @@ One file per tile+VI: `T{TILE}_{VI}.nc` (HLS_VI_Pipeline naming convention)
 | Full-extent datacube (no shapefile) | `{VI}_full_extent_datacube.nc` | `{output_dir}/full_extent/` |
 | Temp clip files | `{VI}_{tile_id}_clip.nc` | `{output_dir}/{shapefile_stem}/{region_label}/_tmp/` (deleted after Phase 2) |
 | Log file | `netcdf_datacube_{YYYYMMDD_HHMMSS}.log` | `--output-dir` root |
+
+### Pixel phenology pipeline
+
+| Output | Pattern | Location |
+|--------|---------|----------|
+| Pixel metric map | `{VI}_{region_label}_pixel_metrics.nc` | `{output_dir}/{region_label}/` |
+| Summary CSV | `{VI}_{region_label}_pixel_metrics_summary.csv` | `{output_dir}/{region_label}/` |
+| Log file | `pixel_phenology_{YYYYMMDD_HHMMSS}.log` | `--output-dir` root |
+
+`VI` and `region_label` are parsed from the input datacube filename:
+`{VI}_{region_label}_datacube.nc` → first underscore-separated token = VI, remainder = region_label.
 
 `region_label` is determined as follows for both pipelines:
 

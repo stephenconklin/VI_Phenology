@@ -31,6 +31,7 @@ import logging
 import numpy as np
 import pandas as pd
 from pathlib import Path
+from scipy.signal import find_peaks as _find_peaks
 
 from phenology_config import PhenologyConfig
 
@@ -210,6 +211,173 @@ def compute_senescence_rate(vi_series: pd.Series, pos_date: pd.Timestamp, eos_da
 
 
 # ---------------------------------------------------------------------------
+# Extended metric helpers (floor/ceiling/season_length/bimodality/cv)
+# ---------------------------------------------------------------------------
+
+def compute_floor_ceiling(vi_series: pd.Series) -> tuple:
+    """Derive floor and ceiling NDVI directly from the annual smooth curve.
+
+    Floor   = minimum of the smoothed annual series (dry-season trough).
+    Ceiling = maximum of the smoothed annual series (wet-season peak).
+
+    Both are derived entirely from the curve shape — no DOY windows or
+    biome-specific configuration required.
+
+    Args:
+        vi_series: pd.Series with DatetimeIndex, smooth daily VI values for one year.
+
+    Returns:
+        (floor_ndvi, ceiling_ndvi) as floats; both NaN if series is empty.
+    """
+    valid = vi_series.dropna()
+    if valid.empty:
+        return np.nan, np.nan
+    return float(valid.min()), float(valid.max())
+
+
+def compute_season_length(
+    vi_series: pd.Series, floor_ndvi: float, threshold_pct: float
+) -> float:
+    """Days the VI remains above floor + threshold_pct * amplitude.
+
+    Uses actual dates (not DOY arithmetic) so it handles cross-year windows
+    (e.g. Southern Hemisphere seasons starting mid-year) correctly.
+
+    Args:
+        vi_series:     pd.Series with DatetimeIndex, smooth daily VI values.
+        floor_ndvi:    Dry-season floor derived from compute_floor_ceiling().
+        threshold_pct: Amplitude fraction defining the season edges (same as sos_threshold).
+
+    Returns:
+        Season length in days (float); NaN if undetermined.
+    """
+    if np.isnan(floor_ndvi) or vi_series.empty:
+        return np.nan
+    valid = vi_series.dropna()
+    if valid.empty:
+        return np.nan
+    ceiling = float(valid.max())
+    amplitude = ceiling - floor_ndvi
+    if amplitude < _MIN_AMPLITUDE:
+        return np.nan
+    threshold = floor_ndvi + threshold_pct * amplitude
+    above_dates = valid.index[valid >= threshold]
+    if len(above_dates) < 2:
+        return np.nan
+    return float((above_dates[-1] - above_dates[0]).days)
+
+
+def compute_greenup_rate(vi_series: pd.Series, floor_ndvi: float) -> float:
+    """Green-up rate (VI/day) from the curve-derived floor to the seasonal peak.
+
+    Slope = (peak_value - floor_value) / (peak_date - floor_date).days.
+    Floor location is the date of the annual minimum (from the smooth curve).
+
+    Args:
+        vi_series:  pd.Series with DatetimeIndex, smooth daily VI values.
+        floor_ndvi: Annual minimum value from compute_floor_ceiling().
+
+    Returns:
+        Green-up rate (float); NaN if undetermined.
+    """
+    if np.isnan(floor_ndvi) or vi_series.empty:
+        return np.nan
+    valid = vi_series.dropna()
+    if valid.empty:
+        return np.nan
+    floor_date = valid.idxmin()
+    peak_date = valid.idxmax()
+    if floor_date >= peak_date:
+        return np.nan
+    span = (peak_date - floor_date).days
+    if span == 0:
+        return np.nan
+    return float((float(valid[peak_date]) - floor_ndvi) / span)
+
+
+def compute_bimodality(
+    vi_series: pd.Series,
+    peak_prominence: float,
+    peak_min_distance_days: int,
+) -> tuple:
+    """Detect peaks in the smooth annual series and quantify bimodality.
+
+    Uses scipy.signal.find_peaks with prominence and minimum-distance constraints.
+    When fewer than two peaks are found, bimodality metrics are NaN.
+
+    Peak separation is measured in calendar days (not DOY), so it is correct for
+    cross-year annual windows.
+
+    Args:
+        vi_series:              pd.Series with DatetimeIndex, smooth daily VI values.
+        peak_prominence:        Min NDVI prominence for a peak to count (e.g. 0.05).
+        peak_min_distance_days: Min separation (integer array positions ≈ days) between peaks.
+
+    Returns:
+        (n_peaks, peak_separation_days, relative_peak_amplitude, valley_depth)
+        All bimodality scalars are NaN when n_peaks < 2.
+    """
+    valid = vi_series.dropna()
+    if valid.empty:
+        return 0, np.nan, np.nan, np.nan
+
+    y = valid.values
+    peaks, _ = _find_peaks(
+        y,
+        prominence=peak_prominence,
+        distance=peak_min_distance_days,
+    )
+    n_p = int(len(peaks))
+
+    if n_p < 2:
+        return n_p, np.nan, np.nan, np.nan
+
+    # Two tallest peaks (by height).
+    sorted_peaks = peaks[np.argsort(y[peaks])[::-1]]
+    p1, p2 = sorted_peaks[0], sorted_peaks[1]
+
+    # Separation in calendar days.
+    dates = valid.index
+    sep = float(abs((dates[p1] - dates[p2]).days))
+
+    h1, h2 = float(y[p1]), float(y[p2])
+    if max(h1, h2) > 0:
+        rel_amp = float(min(h1, h2) / max(h1, h2))
+    else:
+        rel_amp = np.nan
+
+    # Normalised valley depth between the two peaks.
+    lo, hi = min(p1, p2), max(p1, p2)
+    valley = float(np.nanmin(y[lo : hi + 1]))
+    mean_peak = (h1 + h2) / 2
+    valley_d = float((mean_peak - valley) / mean_peak) if mean_peak > 0 else np.nan
+
+    return n_p, sep, rel_amp, valley_d
+
+
+def compute_cv(raw_obs: pd.Series) -> float:
+    """Coefficient of variation of raw (unsmoothed) VI observations.
+
+    CV = std / mean over all valid observation values for the full time series.
+    Whole-series metric — the same value is attached to every annual row for a
+    given (vi, region) pair.
+
+    Args:
+        raw_obs: pd.Series of raw VI values; may contain NaN (non-obs days).
+
+    Returns:
+        CV (float); NaN if mean ≤ 0 or no valid observations.
+    """
+    valid = raw_obs.dropna()
+    if valid.empty:
+        return np.nan
+    mean_val = float(valid.mean())
+    if mean_val <= 0:
+        return np.nan
+    return float(valid.std() / mean_val)
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -230,11 +398,18 @@ def compute_metrics(smoothed: dict, config: PhenologyConfig) -> pd.DataFrame:
         pos_date, pos_doy, pos_value,
         eos_date, eos_doy,
         los_days, ivi,
-        greening_rate, senescence_rate
+        greening_rate, senescence_rate,
+        floor_ndvi, ceiling_ndvi,
+        season_length_days,
+        greenup_rate,
+        n_peaks, peak_separation_days,
+        relative_peak_amplitude, valley_depth,
+        cv
 
     Args:
         smoothed: dict keyed by (vi, region_label) → pd.DataFrame (Layer 2 output)
-        config:   PhenologyConfig with sos_threshold, year_start_doy, output_dir
+        config:   PhenologyConfig with sos_threshold, year_start_doy, output_dir,
+                  min_valid_obs_per_year
 
     Returns:
         pd.DataFrame with one row per (vi, region, year).
@@ -250,6 +425,9 @@ def compute_metrics(smoothed: dict, config: PhenologyConfig) -> pd.DataFrame:
             config.sos_threshold, config.year_start_doy,
         )
 
+        # CV is a whole-series metric — computed once per (vi, region).
+        cv = compute_cv(df['vi_daily'])
+
         pair_rows = []
         for year_label, year_df in annual_windows.items():
             vi_series = year_df.set_index('date')['vi_smooth'].dropna()
@@ -258,6 +436,16 @@ def compute_metrics(smoothed: dict, config: PhenologyConfig) -> pd.DataFrame:
                 logger.warning(
                     "%s / %s / %s: no valid smooth data in annual window — skipping",
                     vi, region_label, year_label,
+                )
+                continue
+
+            n_obs_yr = int((year_df['vi_count'] > 0).sum())
+            if n_obs_yr < config.min_valid_obs_per_year:
+                logger.warning(
+                    "%s / %s / %s: only %d observation(s) in annual window "
+                    "(min_valid_obs_per_year=%d) — skipping year",
+                    vi, region_label, year_label,
+                    n_obs_yr, config.min_valid_obs_per_year,
                 )
                 continue
 
@@ -270,10 +458,19 @@ def compute_metrics(smoothed: dict, config: PhenologyConfig) -> pd.DataFrame:
             green_rate = compute_greening_rate(vi_series, sos_date, pos_date)
             sen_rate = compute_senescence_rate(vi_series, pos_date, eos_date)
 
+            # Extended metrics — derived directly from the annual smooth curve.
+            floor_ndvi, ceiling_ndvi = compute_floor_ceiling(vi_series)
+            season_len = compute_season_length(vi_series, floor_ndvi, config.sos_threshold)
+            greenup_rate = compute_greenup_rate(vi_series, floor_ndvi)
+            n_peaks, peak_sep, rel_amp, valley_d = compute_bimodality(
+                vi_series, config.peak_prominence, config.peak_min_distance_days
+            )
+
             logger.info(
                 "%s / %s / %s: "
                 "SOS=%s (DOY %s), POS=%s (DOY %s, val=%.4f), EOS=%s (DOY %s), "
-                "LOS=%s d, IVI=%.3f, green_rate=%.5f, sen_rate=%.5f",
+                "LOS=%s d, IVI=%.3f, green_rate=%.5f, sen_rate=%.5f | "
+                "floor=%.4f, ceil=%.4f, season_len=%s d, n_peaks=%d",
                 vi, region_label, year_label,
                 sos_date.date() if sos_date else "N/A",
                 int(sos_date.dayofyear) if sos_date else "N/A",
@@ -286,6 +483,10 @@ def compute_metrics(smoothed: dict, config: PhenologyConfig) -> pd.DataFrame:
                 ivi if not np.isnan(ivi) else float('nan'),
                 green_rate if not np.isnan(green_rate) else float('nan'),
                 sen_rate if not np.isnan(sen_rate) else float('nan'),
+                floor_ndvi if not np.isnan(floor_ndvi) else float('nan'),
+                ceiling_ndvi if not np.isnan(ceiling_ndvi) else float('nan'),
+                int(season_len) if not np.isnan(season_len) else "N/A",
+                n_peaks,
             )
 
             pair_rows.append({
@@ -303,6 +504,16 @@ def compute_metrics(smoothed: dict, config: PhenologyConfig) -> pd.DataFrame:
                 'ivi': ivi,
                 'greening_rate': green_rate,
                 'senescence_rate': sen_rate,
+                # Extended metrics
+                'floor_ndvi': floor_ndvi,
+                'ceiling_ndvi': ceiling_ndvi,
+                'season_length_days': season_len,
+                'greenup_rate': greenup_rate,
+                'n_peaks': n_peaks,
+                'peak_separation_days': peak_sep,
+                'relative_peak_amplitude': rel_amp,
+                'valley_depth': valley_d,
+                'cv': cv,
             })
 
         if pair_rows:

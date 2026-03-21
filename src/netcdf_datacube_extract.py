@@ -1068,10 +1068,6 @@ def parse_args():
         "--log-level", default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
-    parser.add_argument(
-        "--no-logfile", action="store_true",
-        help="Disable automatic log file in --output-dir",
-    )
     return parser.parse_args()
 
 
@@ -1088,8 +1084,7 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if not args.no_logfile:
-        setup_log_file(output_dir, "netcdf_datacube", args.log_level)
+    setup_log_file(output_dir, "netcdf_datacube", args.log_level)
 
     netcdf_dir = Path(args.netcdf_dir)
     if not netcdf_dir.exists():

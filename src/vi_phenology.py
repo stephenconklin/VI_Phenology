@@ -30,14 +30,15 @@ from extract import (
     enumerate_regions,
     discover_netcdfs,
     aggregate_across_tiles,
+    aggregate_from_datacube,
     reindex_to_daily,
 )
 from smooth import smooth_timeseries
 from metrics import compute_metrics, write_combined_metrics
 from plot import generate_plots
 from io_utils import (
-    save_parquet, save_observations_csv,
-    write_combined_observations_csv, write_combined_parquet,
+    save_observations_csv,
+    write_combined_observations_csv,
     parse_valid_range, setup_log_file,
 )
 
@@ -55,8 +56,19 @@ def parse_args():
 
     # --- Input ---
     parser.add_argument(
-        "--netcdf-dir", required=True,
-        help="Directory containing VI NetCDF files (T{TILE}_{VI}.nc)",
+        "--netcdf-dir", default=None,
+        help=(
+            "Directory containing VI NetCDF files (T{TILE}_{VI}.nc). "
+            "Mutually exclusive with --input-datacubes."
+        ),
+    )
+    parser.add_argument(
+        "--input-datacubes", nargs="+", default=None, metavar="PATH",
+        help=(
+            "Pre-clipped per-pixel datacube file(s) from the netcdf_datacube pipeline "
+            "({VI}_{region_label}_datacube.nc). VI and region_label are inferred from "
+            "the filename. Mutually exclusive with --netcdf-dir and --shapefile."
+        ),
     )
     parser.add_argument(
         "--vi", nargs="+", default=["NDVI"],
@@ -94,10 +106,11 @@ def parse_args():
     # --- Smoothing ---
     parser.add_argument(
         "--smooth-method", default="savgol",
-        choices=["savgol", "loess", "linear", "harmonic", "none"],
+        choices=["savgol", "loess", "linear", "harmonic", "whittaker", "none"],
         help=(
             "Smoothing / gap-fill method for Layer 2 daily series. "
-            "'none' skips Layer 2 and produces only the sparse daily output."
+            "'none' skips Layer 2 and produces only the sparse daily output. "
+            "'whittaker' uses penalised least-squares (λ set by --smooth-lambda)."
         ),
     )
     parser.add_argument(
@@ -107,6 +120,14 @@ def parse_args():
     parser.add_argument(
         "--smooth-polyorder", type=int, default=3,
         help="Polynomial order for Savitzky-Golay smoothing",
+    )
+    parser.add_argument(
+        "--smooth-lambda", type=float, default=100.0, metavar="LAMBDA",
+        help=(
+            "Smoothing strength for Whittaker method (default: 100). "
+            "Larger values produce smoother curves. Typical range: 10–1000. "
+            "Only used when --smooth-method whittaker."
+        ),
     )
 
     # --- Phenological metrics ---
@@ -123,6 +144,72 @@ def parse_args():
         help=(
             "Day of year to begin each annual phenology window (1–365). "
             "Use values > 1 for Southern Hemisphere or Mediterranean seasonality."
+        ),
+    )
+    parser.add_argument(
+        "--peak-prominence", type=float, default=0.05, metavar="NDVI",
+        help=(
+            "Minimum NDVI prominence for bimodality peak detection (default: 0.05). "
+            "Increase to 0.08–0.10 for noisier or semi-arid time series. "
+            "Floor and ceiling NDVI are derived directly from the annual smooth "
+            "curve (no seasonal DOY windows required). Only used with --metrics."
+        ),
+    )
+    parser.add_argument(
+        "--peak-min-distance", type=int, default=45, metavar="DAYS",
+        help=(
+            "Minimum separation (days) between detected peaks for bimodality "
+            "(default: 45). Only used with --metrics."
+        ),
+    )
+
+    # --- Observation count thresholds ---
+    parser.add_argument(
+        "--min-valid-obs", type=int, default=20, metavar="N",
+        help=(
+            "Minimum valid observations over the full record for a region to be processed "
+            "(default: 20). Regions with fewer observations are skipped with a warning."
+        ),
+    )
+    parser.add_argument(
+        "--min-valid-obs-per-year", type=int, default=5, metavar="N",
+        help=(
+            "Minimum valid observations within an annual window for that year's metrics "
+            "to be computed (default: 5). Years with fewer observations are skipped "
+            "(NaN row omitted), rather than producing unreliable phenological metrics."
+        ),
+    )
+
+    # --- Pixel sampling ---
+    parser.add_argument(
+        "--sample-pixels", type=int, default=None, metavar="N",
+        help=(
+            "Randomly sample N pixels per region and use only those pixels consistently "
+            "across the full time series. Eliminates date-to-date variation in the spatial "
+            "sample caused by cloud masking. None (default) = use all valid pixels."
+        ),
+    )
+    parser.add_argument(
+        "--random-seed", type=int, default=None, metavar="SEED",
+        help=(
+            "Integer seed for the pixel sampling RNG (default: None = random). "
+            "Set to a fixed value for reproducible pixel samples across runs."
+        ),
+    )
+    parser.add_argument(
+        "--min-ndvi-mean", type=float, default=None, metavar="NDVI",
+        help=(
+            "Exclude pixels whose temporal mean NDVI is below this threshold before "
+            "sampling. Removes bare soil, water, and low-vegetation pixels from the "
+            "spatial pool. None (default) = no exclusion."
+        ),
+    )
+    parser.add_argument(
+        "--min-quality-frac", type=float, default=0.0, metavar="FRAC",
+        help=(
+            "Minimum fraction of time steps a pixel must have valid (non-NaN) data to "
+            "be eligible for sampling (default: 0.0 = no filter). Use 0.2–0.3 to exclude "
+            "persistently cloud-covered pixels."
         ),
     )
 
@@ -144,16 +231,12 @@ def parse_args():
 
     # --- Output toggles ---
     parser.add_argument(
-        "--no-parquet", action="store_true",
-        help="Skip writing per-region Parquet time-series files",
-    )
-    parser.add_argument(
         "--no-observations-csv", action="store_true",
         help="Skip writing per-region observations-only CSV files",
     )
     parser.add_argument(
         "--no-combined-outputs", action="store_true",
-        help="Skip writing combined shapefile Parquet and observations CSV files",
+        help="Skip writing the combined shapefile observations CSV",
     )
     parser.add_argument(
         "--no-plot-annual", action="store_true",
@@ -203,15 +286,51 @@ def parse_args():
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Logging verbosity level",
     )
-    parser.add_argument(
-        "--no-logfile", action="store_true",
-        help=(
-            "Disable automatic log file creation. "
-            "By default, a timestamped log file is written to --output-dir."
-        ),
-    )
-
     return parser.parse_args()
+
+
+_VALID_VIS = {"NDVI", "EVI2", "NIRv"}
+
+
+def _enumerate_datacube_regions(config) -> list:
+    """Parse datacube filenames → list of (vi, region_label, dc_path) triples.
+
+    Expected filename pattern: {VI}_{region_label}_datacube.nc
+    VI is the first underscore-separated token; region_label is everything
+    between the first underscore and the trailing '_datacube' suffix.
+    Files that do not match the pattern or whose VI is not in config.vi_list
+    are skipped with a warning/info log.
+    """
+    triples = []
+    for dc_path in config.input_datacubes:
+        stem = dc_path.stem   # e.g. "NDVI_G5_12_datacube"
+        if not stem.endswith("_datacube"):
+            logger.warning(
+                "Datacube filename '%s' does not match expected pattern "
+                "{VI}_{region_label}_datacube.nc — skipping.", dc_path.name,
+            )
+            continue
+        stem_no_suffix = stem[:-len("_datacube")]   # "NDVI_G5_12"
+        parts = stem_no_suffix.split("_", 1)
+        if len(parts) != 2:
+            logger.warning(
+                "Cannot parse VI and region_label from '%s' — skipping.", dc_path.name,
+            )
+            continue
+        vi_from_name, region_label = parts
+        if vi_from_name not in _VALID_VIS:
+            logger.warning(
+                "Unrecognised VI '%s' in '%s' — skipping.", vi_from_name, dc_path.name,
+            )
+            continue
+        if vi_from_name not in config.vi_list:
+            logger.info(
+                "VI '%s' from '%s' not in --vi list %s — skipping.",
+                vi_from_name, dc_path.name, config.vi_list,
+            )
+            continue
+        triples.append((vi_from_name, region_label, dc_path))
+    return triples
 
 
 def main():
@@ -240,7 +359,8 @@ def main():
     }
 
     config = PhenologyConfig(
-        netcdf_dir=Path(args.netcdf_dir),
+        netcdf_dir=Path(args.netcdf_dir) if args.netcdf_dir else None,
+        input_datacubes=[Path(p) for p in args.input_datacubes] if args.input_datacubes else None,
         vi_list=args.vi,
         shapefiles=[Path(s) for s in args.shapefile] if args.shapefile else None,
         shapefile_field=args.shapefile_field,
@@ -249,15 +369,23 @@ def main():
         smooth_method=args.smooth_method,
         smooth_window=args.smooth_window,
         smooth_polyorder=args.smooth_polyorder,
+        smooth_lambda=args.smooth_lambda,
         sos_threshold=args.sos_threshold,
         year_start_doy=args.year_start_doy,
+        peak_prominence=args.peak_prominence,
+        peak_min_distance_days=args.peak_min_distance,
+        min_valid_obs=args.min_valid_obs,
+        min_valid_obs_per_year=args.min_valid_obs_per_year,
+        sample_pixels=args.sample_pixels,
+        random_seed=args.random_seed,
+        min_ndvi_mean=args.min_ndvi_mean,
+        min_quality_frac=args.min_quality_frac,
         plot_style=args.plot_style,
         plot_formats=args.plot_format,
         compute_metrics=args.metrics,
         start_date=args.start_date,
         end_date=args.end_date,
         n_workers=args.workers,
-        save_parquet=not args.no_parquet,
         save_observations_csv=not args.no_observations_csv,
         save_combined_outputs=not args.no_combined_outputs,
         plot_annual=not args.no_plot_annual,
@@ -268,79 +396,209 @@ def main():
 
     config.output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Attach a timestamped log file to the root logger (unless --no-logfile).
-    if not args.no_logfile:
-        setup_log_file(config.output_dir, "vi_phenology", args.log_level)
+    setup_log_file(config.output_dir, "vi_phenology", args.log_level)
 
     logger.info("VI Phenology pipeline starting")
-    logger.info("  NetCDF dir    : %s", config.netcdf_dir)
-    logger.info("  VIs           : %s", ", ".join(config.vi_list))
-    logger.info(
-        "  Shapefiles    : %s",
-        [str(s) for s in config.shapefiles] if config.shapefiles else "None (full extent)",
+    if config.input_datacubes:
+        logger.info("  Input mode      : input-datacubes")
+        logger.info("  Datacubes       : %s", [str(p) for p in config.input_datacubes])
+    else:
+        logger.info("  Input mode      : netcdf-dir")
+        logger.info("  NetCDF dir      : %s", config.netcdf_dir)
+    logger.info("  VIs             : %s", ", ".join(config.vi_list))
+
+    # Valid ranges — one entry per configured VI.
+    ranges_str = "  ".join(
+        f"{vi} [{config.valid_range_for(vi)[0]:.4f}, {config.valid_range_for(vi)[1]:.4f}]"
+        for vi in config.vi_list
     )
-    if config.shapefile_field:
-        logger.info("  Shapefile fields: %s", config.shapefile_field)
-    logger.info("  Smooth method : %s", config.smooth_method)
-    logger.info("  Compute metrics: %s", config.compute_metrics)
-    logger.info("  Workers       : %d", config.n_workers)
-    logger.info("  Output dir    : %s", config.output_dir)
+    logger.info("  Valid ranges    : %s", ranges_str)
+
+    if not config.input_datacubes:
+        logger.info(
+            "  Shapefiles      : %s",
+            [str(s) for s in config.shapefiles] if config.shapefiles else "None (full extent)",
+        )
+        if config.shapefile_field:
+            logger.info("  Shapefile fields: %s", config.shapefile_field)
+
     if config.start_date or config.end_date:
         logger.info(
-            "  Date range    : %s → %s",
+            "  Date range      : %s → %s",
             config.start_date or "beginning of record",
             config.end_date or "end of record",
         )
-    logger.info("  Log level     : %s", args.log_level)
 
-    # Enumerate all regions upfront (validates shapefiles exist).
-    regions = enumerate_regions(config)
-    logger.info("[Setup] %d region(s) to process.", len(regions))
+    # Smoothing — method name plus its active parameters.
+    _m = config.smooth_method
+    if _m == "whittaker":
+        smooth_desc = f"whittaker  λ={config.smooth_lambda:.0f}"
+    elif _m == "savgol":
+        smooth_desc = f"savgol  window={config.smooth_window}d  polyorder={config.smooth_polyorder}"
+    elif _m == "loess":
+        smooth_desc = f"loess  window={config.smooth_window}d"
+    else:
+        smooth_desc = _m   # linear | harmonic | none — no additional parameters
+    logger.info("  Smooth          : %s", smooth_desc)
+
+    # Metrics — log all parameters that affect metric computation.
+    if config.compute_metrics:
+        logger.info(
+            "  Metrics         : sos_threshold=%.2f  year_start_doy=%d  "
+            "peak_prominence=%.3f  peak_min_distance=%dd",
+            config.sos_threshold, config.year_start_doy,
+            config.peak_prominence, config.peak_min_distance_days,
+        )
+    else:
+        logger.info("  Metrics         : disabled")
+
+    # Observation thresholds — always logged as they affect which data is used.
+    logger.info(
+        "  Obs thresholds  : min_valid_obs=%d  min_valid_obs_per_year=%d",
+        config.min_valid_obs, config.min_valid_obs_per_year,
+    )
+
+    # Pixel sampling — only logged when active.
+    if config.sample_pixels is not None or config.min_ndvi_mean is not None or config.min_quality_frac > 0:
+        logger.info(
+            "  Pixel sampling  : n=%s  seed=%s  min_ndvi_mean=%s  min_quality_frac=%.2f",
+            config.sample_pixels if config.sample_pixels is not None else "all",
+            config.random_seed if config.random_seed is not None else "random",
+            f"{config.min_ndvi_mean:.4f}" if config.min_ndvi_mean is not None else "none",
+            config.min_quality_frac,
+        )
+
+    logger.info("  Workers         : %d", config.n_workers)
+    logger.info("  Output dir      : %s", config.output_dir)
+    logger.info("  Log level       : %s", args.log_level)
+
+    # Enumerate all regions upfront.
+    if config.input_datacubes:
+        # Datacube mode: regions are determined by filename parsing.
+        from collections import defaultdict
+        dc_triples = _enumerate_datacube_regions(config)
+        if not dc_triples:
+            logger.error(
+                "No valid datacubes found. Check filenames follow "
+                "{VI}_{region_label}_datacube.nc and --vi includes the VI in the filename."
+            )
+            sys.exit(1)
+        # Group by region_label preserving insertion order.
+        by_region: dict = defaultdict(list)
+        for vi, region_label, dc_path in dc_triples:
+            by_region[region_label].append((vi, dc_path))
+        # Register each region so output_dir_for() builds correct paths.
+        for region_label in by_region:
+            config.register_region(region_label, region_label)
+        regions_iter = list(by_region.items())   # [(region_label, [(vi, dc_path), ...])]
+        n_regions = len(regions_iter)
+        logger.info("[Setup] %d region(s) to process (datacube mode).", n_regions)
+    else:
+        # Standard mode: regions come from shapefiles (or full_extent).
+        std_regions = enumerate_regions(config)
+        regions_iter = [(rl, roi_gdf) for rl, roi_gdf in std_regions]
+        n_regions = len(regions_iter)
+        logger.info("[Setup] %d region(s) to process.", n_regions)
 
     # Accumulate metrics rows and observation data across all regions for combined CSVs.
     all_metrics: list[pd.DataFrame] = []
     all_obs: dict = {}
-    all_parquet: dict = {}
     any_extracted = False
 
     # ── Per-region streaming pipeline ────────────────────────────────────────
-    for region_idx, (region_label, roi_gdf) in enumerate(regions, start=1):
+    for region_idx, region_item in enumerate(regions_iter, start=1):
+
+        if config.input_datacubes:
+            region_label, vi_dc_pairs = region_item
+            roi_gdf = None
+        else:
+            region_label, roi_gdf = region_item
+            vi_dc_pairs = None
+
         logger.info(
-            "══ Region %d/%d: %s ══", region_idx, len(regions), region_label
+            "══ Region %d/%d: %s ══", region_idx, n_regions, region_label
         )
 
         # Layer 0+1: extract all configured VIs for this region.
         region_raw: dict = {}
-        for vi in config.vi_list:
-            nc_paths = discover_netcdfs(config.netcdf_dir, vi)
-            if not nc_paths:
-                logger.warning(
-                    "Skipping %s / %s — no matching NetCDF files in %s",
-                    vi, region_label, config.netcdf_dir,
+
+        if config.input_datacubes:
+            # Datacube mode: read each VI from its pre-clipped file.
+            for vi, dc_path in vi_dc_pairs:
+                vmin, vmax = config.valid_range_for(vi)
+                logger.info(
+                    "[Layer 0+1] %s / %s — datacube mode, valid range [%.4f, %.4f]",
+                    vi, region_label, vmin, vmax,
                 )
-                continue
-
-            vmin, vmax = config.valid_range_for(vi)
-            logger.info(
-                "[Layer 0+1] %s / %s — %d tile(s), valid range [%.4f, %.4f]",
-                vi, region_label, len(nc_paths), vmin, vmax,
-            )
-
-            obs_df = aggregate_across_tiles(
-                nc_paths, roi_gdf, vmin, vmax,
-                start_date=config.start_date,
-                end_date=config.end_date,
-                n_workers=config.n_workers,
-            )
-            if obs_df.empty:
-                logger.warning(
-                    "%s / %s: no valid observations extracted — skipping this VI.",
-                    vi, region_label,
+                obs_df = aggregate_from_datacube(
+                    dc_path, vi, vmin, vmax,
+                    start_date=config.start_date,
+                    end_date=config.end_date,
+                    n_sample=config.sample_pixels,
+                    random_seed=config.random_seed,
+                    min_ndvi_mean=config.min_ndvi_mean,
+                    min_quality_frac=config.min_quality_frac,
                 )
-                continue
+                if obs_df.empty:
+                    logger.warning(
+                        "%s / %s: no valid observations extracted — skipping this VI.",
+                        vi, region_label,
+                    )
+                    continue
+                n_obs = int(len(obs_df))
+                if n_obs < config.min_valid_obs:
+                    logger.warning(
+                        "%s / %s: only %d valid observation(s) (min_valid_obs=%d) — skipping.",
+                        vi, region_label, n_obs, config.min_valid_obs,
+                    )
+                    continue
+                daily_df = reindex_to_daily(obs_df)
+                region_raw[(vi, region_label)] = daily_df
 
-            daily_df = reindex_to_daily(obs_df)
-            region_raw[(vi, region_label)] = daily_df
+        else:
+            # Standard mode: discover tiles and aggregate across them.
+            for vi in config.vi_list:
+                nc_paths = discover_netcdfs(config.netcdf_dir, vi)
+                if not nc_paths:
+                    logger.warning(
+                        "Skipping %s / %s — no matching NetCDF files in %s",
+                        vi, region_label, config.netcdf_dir,
+                    )
+                    continue
+
+                vmin, vmax = config.valid_range_for(vi)
+                logger.info(
+                    "[Layer 0+1] %s / %s — %d tile(s), valid range [%.4f, %.4f]",
+                    vi, region_label, len(nc_paths), vmin, vmax,
+                )
+
+                obs_df = aggregate_across_tiles(
+                    nc_paths, roi_gdf, vmin, vmax,
+                    start_date=config.start_date,
+                    end_date=config.end_date,
+                    n_workers=config.n_workers,
+                    n_sample=config.sample_pixels,
+                    random_seed=config.random_seed,
+                    min_ndvi_mean=config.min_ndvi_mean,
+                    min_quality_frac=config.min_quality_frac,
+                )
+                if obs_df.empty:
+                    logger.warning(
+                        "%s / %s: no valid observations extracted — skipping this VI.",
+                        vi, region_label,
+                    )
+                    continue
+
+                n_obs = int(len(obs_df))
+                if n_obs < config.min_valid_obs:
+                    logger.warning(
+                        "%s / %s: only %d valid observation(s) (min_valid_obs=%d) — skipping.",
+                        vi, region_label, n_obs, config.min_valid_obs,
+                    )
+                    continue
+
+                daily_df = reindex_to_daily(obs_df)
+                region_raw[(vi, region_label)] = daily_df
 
         if not region_raw:
             logger.warning(
@@ -358,13 +616,6 @@ def main():
                 config.smooth_method, region_label,
             )
             region_smoothed = smooth_timeseries(region_raw, config)
-
-        # Save Parquet and observations CSV for this region.
-        if config.save_parquet:
-            logger.info("[Output] Saving Parquet for region '%s' ...", region_label)
-            region_parquet = save_parquet(region_raw, region_smoothed, config)
-            for key, dfs in region_parquet.items():
-                all_parquet.setdefault(key, []).extend(dfs)
 
         if config.save_observations_csv:
             logger.info("[Output] Saving observations CSV for region '%s' ...", region_label)
@@ -396,11 +647,17 @@ def main():
 
     # ── Post-loop ─────────────────────────────────────────────────────────────
     if not any_extracted:
-        logger.error(
-            "No time series extracted for any region. "
-            "Check --netcdf-dir contains T*_{VI}.nc files "
-            "and that any shapefile intersects the data extent."
-        )
+        if config.input_datacubes:
+            logger.error(
+                "No time series extracted from any datacube. "
+                "Check that files exist and the VI variable is present in each file."
+            )
+        else:
+            logger.error(
+                "No time series extracted for any region. "
+                "Check --netcdf-dir contains T*_{VI}.nc files "
+                "and that any shapefile intersects the data extent."
+            )
         sys.exit(1)
 
     # Combined shapefile metrics CSV (written after all regions are complete).
@@ -409,9 +666,6 @@ def main():
         write_combined_metrics(all_metrics_df, config)
 
     if config.save_combined_outputs:
-        # Combined shapefile Parquet (full daily series; written after all regions are complete).
-        write_combined_parquet(all_parquet, config)
-        # Combined shapefile observations CSV (written after all regions are complete).
         write_combined_observations_csv(all_obs, config)
 
     logger.info("Done. All outputs written to: %s", config.output_dir)
