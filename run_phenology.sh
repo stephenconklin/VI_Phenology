@@ -96,7 +96,7 @@ MERGE_CROSS_CRS=true   # true = reproject + merge into one datacube (default)
 SMOOTH_METHOD="whittaker"                # savgol | loess | linear | harmonic | whittaker | none
 SMOOTH_WINDOW=15                      # days (savgol, loess)
 SMOOTH_POLYORDER=3                    # savgol only
-SMOOTH_LAMBDA=500                     # Whittaker only: smoothing strength (10–1000; higher = smoother)
+SMOOTH_LAMBDA=10                     # Whittaker only: smoothing strength (10–1000; higher = smoother)
 
 # ── Metrics ────────────────────────────────────────────────────────────────────
 COMPUTE_METRICS=false                  # true | false
