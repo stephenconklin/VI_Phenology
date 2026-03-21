@@ -244,14 +244,24 @@ def _process_one_tile(args: tuple) -> dict:
             tile_count  = masked.count(dim=['y', 'x']).values                  # (time,)
             tile_sum_sq = (masked ** 2).sum(dim=['y', 'x'], skipna=True).values  # (time,)
 
-        dates = pd.to_datetime(da['time'].values)
+        # Normalize to midnight — HLS tiles can contain L30 and S30 acquisitions
+        # on the same calendar date. Accumulate rather than overwrite so same-day
+        # entries are pooled before being returned to the main process.
+        dates = pd.to_datetime(da['time'].values).normalize()
 
         date_stats: dict = {}
         n_valid_dates = 0
         total_pixels = 0
         for i, date in enumerate(dates):
             n = int(tile_count[i])
-            date_stats[date] = [float(tile_sum[i]), float(tile_sum_sq[i]), n]
+            s  = float(tile_sum[i])
+            sq = float(tile_sum_sq[i])
+            if date not in date_stats:
+                date_stats[date] = [s, sq, n]
+            else:
+                date_stats[date][0] += s
+                date_stats[date][1] += sq
+                date_stats[date][2] += n
             if n > 0:
                 n_valid_dates += 1
                 total_pixels += n
@@ -797,16 +807,30 @@ def aggregate_from_datacube(
         agg_count  = masked.count(dim=['y', 'x']).values.astype(np.int64)
         agg_sum_sq = (masked ** 2).sum(dim=['y', 'x'], skipna=True).values.astype(np.float64)
 
-    dates = pd.to_datetime(da.coords['time'].values)
+    # Normalize timestamps to midnight — HLS datacubes can contain both Landsat
+    # (L30) and Sentinel-2 (S30) acquisitions on the same calendar date, producing
+    # duplicate time steps. Pool same-day pixel stats before computing the mean so
+    # the Layer 0 DataFrame has exactly one row per calendar date.
+    dates = pd.to_datetime(da.coords['time'].values).normalize()
 
-    # Build Layer 0 DataFrame (observation dates only — vi_count > 0).
-    rows = []
+    # Accumulate sum / count / sum_sq per calendar date.
+    date_accum: dict = {}   # date -> [sum, count, sum_sq]
     for i, date in enumerate(dates):
         n = int(agg_count[i])
         if n == 0:
             continue
         s  = float(agg_sum[i])
         sq = float(agg_sum_sq[i])
+        if date not in date_accum:
+            date_accum[date] = [s, n, sq]
+        else:
+            date_accum[date][0] += s
+            date_accum[date][1] += n
+            date_accum[date][2] += sq
+
+    # Build Layer 0 DataFrame (observation dates only — vi_count > 0).
+    rows = []
+    for date, (s, n, sq) in sorted(date_accum.items()):
         mean = s / n
         if n > 1:
             var = max((sq - n * mean ** 2) / (n - 1), 0.0)
