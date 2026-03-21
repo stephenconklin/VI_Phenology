@@ -13,7 +13,6 @@ outputs/                                         ← --output-dir
 ├── vi_phenology_20260303_153100.log             ← log file at output-dir root
 └── biomes/                                      ← shapefile stem folder
     ├── Cape_Fynbos/                             ← one subfolder per field value
-    │   ├── NDVI_Cape_Fynbos_timeseries.parquet
     │   ├── NDVI_Cape_Fynbos_observations.csv
     │   ├── NDVI_Cape_Fynbos_metrics.csv
     │   ├── NDVI_Cape_Fynbos_timeseries.png
@@ -24,7 +23,6 @@ outputs/                                         ← --output-dir
     │   └── Cape_Fynbos_multi_vi.png
     ├── Succulent_Karoo/
     │   └── ...
-    ├── NDVI_biomes_timeseries.parquet           ← all regions stacked, full daily series
     ├── NDVI_biomes_timeseries.csv               ← all regions stacked, observations only
     └── NDVI_biomes_metrics.csv                  ← combined metrics (field-split runs only)
 ```
@@ -41,8 +39,6 @@ and the region label is `full_extent`.
 
 | File | Description |
 |------|-------------|
-| `{VI}_{region}_timeseries.parquet` | Complete daily time series (all rows including gap days): raw + smoothed VI columns, provenance flags |
-| `{VI}_{shapefile_stem}_timeseries.parquet` | All regions stacked with `region` column — same full daily series as above. Written to shapefile root folder when `--shapefile-field` yields multiple regions. |
 | `{VI}_{region}_observations.csv` | **Actual HLS observations only** — date, vi_raw, vi_count, vi_std, vi_smooth (at obs dates). No gap-filled rows. |
 | `{VI}_{shapefile_stem}_timeseries.csv` | All regions stacked with `region` column — same columns as observations CSV above. Written to shapefile root folder when `--shapefile-field` yields multiple regions. |
 | `{VI}_{region}_metrics.csv` | Phenological metrics per year for this region |
@@ -59,33 +55,18 @@ and the region label is `full_extent`.
 All output types are enabled by default. Disable any combination in `run_phenology.sh`:
 
 ```bash
-SAVE_PARQUET=false            # skip per-region Parquet files
 SAVE_OBSERVATIONS_CSV=false   # skip per-region observations CSV files
-SAVE_COMBINED_OUTPUTS=false   # skip combined shapefile Parquet + observations CSV
+SAVE_COMBINED_OUTPUTS=false   # skip combined shapefile observations CSV
 PLOT_ANNUAL=false             # skip annual DOY overlay plot
 PLOT_TIMESERIES=false         # skip full time-series plot
 PLOT_ANOMALY=false            # skip anomaly plot
 PLOT_MULTI_VI=false           # skip multi-VI comparison panel
 ```
 
-Or via CLI flags: `--no-parquet`, `--no-observations-csv`, `--no-combined-outputs`,
+Or via CLI flags: `--no-observations-csv`, `--no-combined-outputs`,
 `--no-plot-annual`, `--no-plot-timeseries`, `--no-plot-anomaly`, `--no-plot-multi-vi`.
 
 See [CLI Reference](cli_reference.md) for the full toggle table.
-
----
-
-### Parquet Schema
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `date` | datetime64[ns] | Calendar date |
-| `vi_raw` | float32 | Spatially aggregated VI on observation days; NaN on non-observation days |
-| `vi_count` | int32 | Valid pixel count contributing to `vi_raw`; 0 on non-observation days |
-| `vi_std` | float32 | Spatial standard deviation of valid pixels; NaN on non-observation days |
-| `vi_daily` | float32 | Daily reindex of `vi_raw` (NaN gaps preserved) |
-| `vi_smooth` | float32 | Smoothed, gap-filled daily values (absent when `--smooth-method none`) |
-| `vi_smooth_flag` | str | Provenance: `observed` · `interpolated` · `extrapolated` |
 
 ---
 
@@ -154,6 +135,33 @@ For full details on the datacube pipeline, see [netCDF Datacube Pipeline](datacu
 
 ---
 
+## Pixel Phenology Pipeline
+
+### File Structure
+
+```
+outputs/                                              ← --output-dir
+├── pixel_phenology_20260320_153100.log               ← log file at output-dir root
+└── Mesa_Verde/                                       ← one subfolder per region
+    ├── NDVI_Mesa_Verde_pixel_metrics.nc
+    └── NDVI_Mesa_Verde_pixel_metrics_summary.csv
+```
+
+VI and `region_label` are parsed from the input datacube filename:
+`{VI}_{region_label}_datacube.nc` → first underscore-separated token = VI, remainder = region_label.
+
+---
+
+### Output Files
+
+| File | Description |
+|------|-------------|
+| `{VI}_{region_label}_pixel_metrics.nc` | CF-1.8 NetCDF with 18 metric bands (one per phenological metric), zlib compressed (complevel=4). One file per (VI, region_label). |
+| `{VI}_{region_label}_pixel_metrics_summary.csv` | Spatial statistics per metric: mean, std, p05, p50, p95, n_valid_pixels |
+| `pixel_phenology_{timestamp}.log` | Timestamped log file written to `--output-dir` root |
+
+---
+
 ## Date Range Filtering
 
 Use `--start-date` and `--end-date` to restrict processing to a specific time window.
@@ -198,23 +206,11 @@ All progress, warnings, and errors are written to the terminal (stderr) using Py
 
 ### Log File
 
-By default, a timestamped log file is automatically written to `--output-dir`:
+A timestamped log file is always written to `--output-dir`:
 
 ```
 outputs/vi_phenology_20260303_153100.log        ← phenology pipeline
 outputs/netcdf_datacube_20260303_153100.log     ← datacube pipeline
-```
-
-To disable automatic log file creation:
-
-```bash
-python src/vi_phenology.py --no-logfile ...
-python src/netcdf_datacube_extract.py --no-logfile ...
-```
-
-Or in `run_phenology.sh`:
-```bash
-NO_LOGFILE=true
 ```
 
 ### Verbosity Levels

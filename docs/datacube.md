@@ -216,7 +216,6 @@ python src/netcdf_datacube_extract.py --help
 | `--no-merge-same-crs` | off | Disable same-CRS tile merging; write per-tile files |
 | `--no-merge-cross-crs` | off | Disable cross-CRS reprojection + merge; write per-tile files |
 | `--log-level LEVEL` | `INFO` | `DEBUG` `INFO` `WARNING` `ERROR` |
-| `--no-logfile` | off | Disable automatic log file creation |
 
 ---
 

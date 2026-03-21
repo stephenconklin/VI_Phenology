@@ -16,6 +16,15 @@ Requires a smoothing method (`--smooth-method` must not be `none`).
 | IVI | `ivi` | Integrated VI: trapezoidal area under the smooth curve between SOS and EOS |
 | Greening rate | `greening_rate` | Mean slope (VI/day) from SOS to POS |
 | Senescence rate | `senescence_rate` | Mean slope (VI/day) from POS to EOS (negative for a declining curve) |
+| Floor NDVI | `floor_ndvi` | Annual minimum of the smooth curve (dry-season trough). Derived directly from the curve — no biome-specific DOY window needed. |
+| Ceiling NDVI | `ceiling_ndvi` | Annual maximum of the smooth curve (= POS value) |
+| Season length | `season_length_days` | Days above `floor + sos_threshold × amplitude`; computed from actual dates (cross-year safe) |
+| Green-up rate | `greenup_rate` | `(ceiling − floor) / (peak_date − floor_date).days` |
+| Peak count | `n_peaks` | Number of peaks detected by `scipy.signal.find_peaks` (prominence + distance thresholds) |
+| Peak separation | `peak_separation_days` | Calendar days between the two tallest peaks (NaN if n_peaks < 2) |
+| Relative peak amplitude | `relative_peak_amplitude` | `min(h1, h2) / max(h1, h2)` ratio between the two tallest peaks (NaN if n_peaks < 2) |
+| Valley depth | `valley_depth` | Normalised trough depth between peaks: `((h1+h2)/2 − valley) / ((h1+h2)/2)` (NaN if n_peaks < 2) |
+| CV | `cv` | Coefficient of variation of raw (unsmoothed) observations across the full time series. Same value on every year row for a given (vi, region). |
 
 ---
 
@@ -62,6 +71,8 @@ January through December.
 | `--metrics` | off | Compute and export phenological metrics |
 | `--sos-threshold FRACTION` | `0.20` | Amplitude fraction for SOS/EOS detection |
 | `--year-start-doy DOY` | `1` | Day of year to begin each annual phenology window (1–365) |
+| `--peak-prominence NDVI` | `0.05` | Minimum NDVI prominence for a peak to be counted by bimodality detection (only active when `--metrics` is set) |
+| `--peak-min-distance DAYS` | `45` | Minimum separation in days between detected peaks (only active when `--metrics` is set) |
 
 ---
 

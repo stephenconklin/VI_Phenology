@@ -171,7 +171,9 @@ def _process_one_tile(args: tuple) -> dict:
     pattern used in HLS_VI_Pipeline Step 04.
 
     Args:
-        args: Tuple of (nc_path, roi_gdf, vmin, vmax, start_date, end_date).
+        args: Tuple of (nc_path, roi_gdf, vmin, vmax, start_date, end_date,
+              pixel_coords). pixel_coords is a set of (y_round, x_round) tuples
+              or None (use all pixels).
 
     Returns:
         dict with keys:
@@ -184,7 +186,7 @@ def _process_one_tile(args: tuple) -> dict:
             total_pixels  int  — cumulative valid-pixel count across all dates
     """
     import dask
-    nc_path, roi_gdf, vmin, vmax, start_date, end_date = args
+    nc_path, roi_gdf, vmin, vmax, start_date, end_date, pixel_coords = args
 
     try:
         if roi_gdf is not None:
@@ -212,6 +214,28 @@ def _process_one_tile(args: tuple) -> dict:
                 }
 
         masked = da.where((da >= vmin) & (da <= vmax))
+
+        # Apply pixel sample mask when a sampled coordinate set is provided.
+        # Build a 2D boolean mask in O(N_sample) time using dict lookups.
+        if pixel_coords is not None:
+            y_arr = np.round(da.coords['y'].values.astype(np.float64), 1)
+            x_arr = np.round(da.coords['x'].values.astype(np.float64), 1)
+            y_to_idx = {float(y): i for i, y in enumerate(y_arr)}
+            x_to_idx = {float(x): i for i, x in enumerate(x_arr)}
+            pixel_mask_2d = np.zeros((len(y_arr), len(x_arr)), dtype=bool)
+            for (y_r, x_r) in pixel_coords:
+                iy = y_to_idx.get(float(y_r))
+                ix = x_to_idx.get(float(x_r))
+                if iy is not None and ix is not None:
+                    pixel_mask_2d[iy, ix] = True
+            if not pixel_mask_2d.any():
+                return {
+                    'tile_name': nc_path.name, 'status': 'skip',
+                    'message': f"Tile {nc_path.name}: no sampled pixels within tile extent",
+                    'date_stats': None, 'n_dates': 0, 'n_valid_dates': 0, 'total_pixels': 0,
+                }
+            pixel_mask_da = xr.DataArray(pixel_mask_2d, dims=['y', 'x'])
+            masked = masked.where(pixel_mask_da)
 
         # Compute with synchronous scheduler — prevents nested thread pools inside
         # the worker process from competing with other parallel workers for cores.
@@ -247,6 +271,205 @@ def _process_one_tile(args: tuple) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Pixel selection worker (module-level — must not be nested for pickling)
+# ---------------------------------------------------------------------------
+
+def _compute_pixel_stats_one_tile(args: tuple) -> dict:
+    """Worker: compute per-pixel temporal statistics used for pixel selection.
+
+    For each pixel that has at least one valid observation, returns the sum of
+    valid NDVI values and the count of valid timesteps — sufficient to compute
+    temporal mean NDVI and valid fraction after combining across tiles.
+
+    Must be defined at module top level (not nested) to be picklable by
+    multiprocessing on all platforms.
+
+    Args:
+        args: Tuple of (nc_path, roi_gdf, vmin, vmax, start_date, end_date).
+
+    Returns:
+        dict with keys:
+            tile_name  str
+            status     'ok' | 'skip' | 'error'
+            n_time     int  — total time steps in this tile
+            pixels     list of (y_round, x_round, ndvi_sum, count) | None
+            message    str  — diagnostic (skip/error only)
+    """
+    import dask
+    nc_path, roi_gdf, vmin, vmax, start_date, end_date = args
+
+    try:
+        if roi_gdf is not None:
+            da = clip_netcdf_to_roi(nc_path, roi_gdf)
+            if da is None:
+                return {
+                    'tile_name': nc_path.name, 'status': 'skip',
+                    'message': f"Tile {nc_path.name}: no overlap with ROI",
+                    'n_time': 0, 'pixels': None,
+                }
+        else:
+            da = open_full_extent(nc_path)
+
+        if start_date or end_date:
+            da = da.sel(time=slice(start_date, end_date))
+            if da.sizes['time'] == 0:
+                return {
+                    'tile_name': nc_path.name, 'status': 'skip',
+                    'message': f"Tile {nc_path.name}: no time steps in date range",
+                    'n_time': 0, 'pixels': None,
+                }
+
+        n_time = int(da.sizes['time'])
+        masked = da.where((da >= vmin) & (da <= vmax))
+
+        with dask.config.set(scheduler='synchronous'):
+            pixel_sum   = masked.sum(dim='time', skipna=True).values   # (y, x)
+            pixel_count = masked.count(dim='time').values               # (y, x)
+
+        # Round coordinates to 1 decimal place for reliable cross-tile matching.
+        y_coords = np.round(da.coords['y'].values.astype(np.float64), 1)
+        x_coords = np.round(da.coords['x'].values.astype(np.float64), 1)
+
+        # Vectorised: only include pixels with at least one valid observation.
+        valid_iy, valid_ix = np.where(pixel_count > 0)
+        pixels = list(zip(
+            y_coords[valid_iy].tolist(),
+            x_coords[valid_ix].tolist(),
+            pixel_sum[valid_iy, valid_ix].tolist(),
+            pixel_count[valid_iy, valid_ix].astype(int).tolist(),
+        ))
+
+        return {'tile_name': nc_path.name, 'status': 'ok', 'n_time': n_time, 'pixels': pixels}
+
+    except Exception as e:
+        return {
+            'tile_name': nc_path.name, 'status': 'error',
+            'message': f"{type(e).__name__}: {e}",
+            'n_time': 0, 'pixels': None,
+        }
+
+
+def select_pixel_sample(
+    nc_paths: list,
+    roi_gdf: Optional[gpd.GeoDataFrame],
+    vmin: float,
+    vmax: float,
+    n_sample: Optional[int],
+    random_seed: Optional[int],
+    min_ndvi_mean: Optional[float],
+    min_quality_frac: float,
+    start_date: Optional[str],
+    end_date: Optional[str],
+    n_workers: int,
+) -> set:
+    """Select a spatially consistent pixel sample across all tiles.
+
+    Phase A of the pixel-sampling flow. Runs a parallel pass over all tiles to
+    compute per-pixel temporal mean NDVI and valid fraction, then applies
+    optional filters and draws a random sample of N pixels.
+
+    Pixels are identified by (y_round, x_round) coordinate tuples (rounded to
+    1 decimal place). Same-CRS tiles share an identical 30-m grid, so
+    coordinates are directly comparable across tiles. Cross-CRS tiles will not
+    share coordinates; their pixels are sampled independently and the union is
+    returned — which is the same graceful behaviour as the current un-sampled
+    extraction.
+
+    Args:
+        nc_paths:         List of NetCDF Paths for a single VI.
+        roi_gdf:          GeoDataFrame of the ROI, or None for full extent.
+        vmin, vmax:       Valid VI range (inclusive).
+        n_sample:         Number of pixels to randomly sample; None = keep all.
+        random_seed:      Seed for np.random.default_rng; None = random.
+        min_ndvi_mean:    Exclude pixels with temporal mean NDVI below this.
+        min_quality_frac: Exclude pixels valid in fewer than this fraction of
+                          timesteps (0.0 = no filter).
+        start_date:       Optional date lower bound (YYYY-MM-DD).
+        end_date:         Optional date upper bound (YYYY-MM-DD).
+        n_workers:        Number of parallel worker processes.
+
+    Returns:
+        Set of (y_round, x_round) float tuples representing sampled pixels.
+        Returns an empty set if no pixels pass the filters.
+    """
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    work_items = [
+        (nc_path, roi_gdf, vmin, vmax, start_date, end_date)
+        for nc_path in nc_paths
+    ]
+
+    # Accumulate per-pixel stats across tiles.
+    # pixel_dict: (y_r, x_r) -> [ndvi_sum, valid_count, total_n_time]
+    pixel_dict: dict = {}
+
+    with ProcessPoolExecutor(max_workers=n_workers) as executor:
+        futures = {executor.submit(_compute_pixel_stats_one_tile, item): item
+                   for item in work_items}
+        for future in as_completed(futures):
+            result = future.result()
+            if result['status'] != 'ok' or not result['pixels']:
+                continue
+            n_time = result['n_time']
+            for (y_r, x_r, ndvi_sum, count) in result['pixels']:
+                key = (y_r, x_r)
+                if key not in pixel_dict:
+                    pixel_dict[key] = [0.0, 0, 0]
+                pixel_dict[key][0] += ndvi_sum
+                pixel_dict[key][1] += count
+                pixel_dict[key][2] += n_time
+
+    if not pixel_dict:
+        logger.warning("select_pixel_sample: no valid pixels found across all tiles.")
+        return set()
+
+    all_keys = list(pixel_dict.keys())
+    totals = np.array([[v[0], v[1], v[2]] for v in pixel_dict.values()])
+    # Avoid division by zero for total_count (should not happen since we skip count==0 above).
+    valid_count = totals[:, 1].astype(float)
+    mean_ndvi  = np.where(valid_count > 0, totals[:, 0] / valid_count, np.nan)
+    valid_frac = np.where(totals[:, 2] > 0, valid_count / totals[:, 2], 0.0)
+
+    # Apply filters.
+    keep = np.ones(len(all_keys), dtype=bool)
+    if min_ndvi_mean is not None:
+        keep &= (mean_ndvi >= min_ndvi_mean)
+    if min_quality_frac > 0.0:
+        keep &= (valid_frac >= min_quality_frac)
+
+    eligible_keys = [all_keys[i] for i in range(len(all_keys)) if keep[i]]
+    n_eligible = len(eligible_keys)
+    logger.info(
+        "  Pixel selection: %d total, %d eligible (min_ndvi_mean=%s, min_quality_frac=%.2f)",
+        len(all_keys), n_eligible,
+        f"{min_ndvi_mean:.3f}" if min_ndvi_mean is not None else "none",
+        min_quality_frac,
+    )
+
+    if n_eligible == 0:
+        logger.warning("  No pixels passed selection filters — region will be skipped.")
+        return set()
+
+    if n_sample is not None and n_sample < n_eligible:
+        rng = np.random.default_rng(random_seed)
+        chosen = rng.choice(n_eligible, size=n_sample, replace=False)
+        selected = {eligible_keys[int(i)] for i in chosen}
+        logger.info(
+            "  Randomly sampled %d/%d pixels (seed=%s)",
+            n_sample, n_eligible, random_seed,
+        )
+    else:
+        selected = set(eligible_keys)
+        if n_sample is not None:
+            logger.info(
+                "  Requested %d samples but only %d eligible — using all eligible pixels.",
+                n_sample, n_eligible,
+            )
+
+    return selected
+
+
+# ---------------------------------------------------------------------------
 # Multi-tile aggregation
 # ---------------------------------------------------------------------------
 
@@ -258,6 +481,10 @@ def aggregate_across_tiles(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     n_workers: int = 4,
+    n_sample: Optional[int] = None,
+    random_seed: Optional[int] = None,
+    min_ndvi_mean: Optional[float] = None,
+    min_quality_frac: float = 0.0,
 ) -> pd.DataFrame:
     """Aggregate Layer 0 observations across multiple tiles for a single VI.
 
@@ -270,25 +497,49 @@ def aggregate_across_tiles(
     averaging per-tile statistics, which ensures a correctly weighted pooled mean
     and unbiased pooled standard deviation.
 
+    When pixel sampling is requested (n_sample, min_ndvi_mean, or min_quality_frac
+    are set), a Phase A pixel selection pass runs first via select_pixel_sample().
+    The resulting pixel coordinate set is passed to each extraction worker so that
+    only the sampled pixels contribute to the spatial mean at each time step.
+    This ensures the same spatial sample is used consistently across the full
+    time series, eliminating date-to-date variation in which pixels are included.
+
     Args:
-        nc_paths:   List of NetCDF Paths for a single VI.
-        roi_gdf:    GeoDataFrame of the ROI, or None for full extent.
-        vmin:       Minimum valid VI value (inclusive).
-        vmax:       Maximum valid VI value (inclusive).
-        start_date: Optional ISO-8601 date string (YYYY-MM-DD); only dates on or
-                    after this value are processed. None = no lower bound.
-        end_date:   Optional ISO-8601 date string (YYYY-MM-DD); only dates on or
-                    before this value are processed. None = no upper bound.
-        n_workers:  Number of parallel worker processes (default 4). Set to 1 to
-                    process tiles sequentially (useful for debugging).
+        nc_paths:         List of NetCDF Paths for a single VI.
+        roi_gdf:          GeoDataFrame of the ROI, or None for full extent.
+        vmin:             Minimum valid VI value (inclusive).
+        vmax:             Maximum valid VI value (inclusive).
+        start_date:       Optional ISO-8601 date string (YYYY-MM-DD).
+        end_date:         Optional ISO-8601 date string (YYYY-MM-DD).
+        n_workers:        Number of parallel worker processes (default 4).
+        n_sample:         Number of pixels to randomly sample; None = all pixels.
+        random_seed:      RNG seed for reproducibility; None = random.
+        min_ndvi_mean:    Exclude pixels whose temporal mean NDVI is below this.
+        min_quality_frac: Exclude pixels valid in fewer than this fraction of
+                          timesteps (0.0 = no filter).
 
     Returns:
         pd.DataFrame with columns [date, vi_raw, vi_count, vi_std] (Layer 0).
     """
     from concurrent.futures import ProcessPoolExecutor, as_completed
 
+    # ── Phase A: pixel selection (only when sampling or filtering is requested) ─
+    pixel_coords: Optional[set] = None
+    if n_sample is not None or min_ndvi_mean is not None or min_quality_frac > 0.0:
+        logger.info("  Phase A: selecting pixel sample ...")
+        pixel_coords = select_pixel_sample(
+            nc_paths, roi_gdf, vmin, vmax,
+            n_sample=n_sample, random_seed=random_seed,
+            min_ndvi_mean=min_ndvi_mean, min_quality_frac=min_quality_frac,
+            start_date=start_date, end_date=end_date,
+            n_workers=n_workers,
+        )
+        if len(pixel_coords) == 0:
+            return pd.DataFrame(columns=['date', 'vi_raw', 'vi_count', 'vi_std'])
+        logger.info("  Phase B: extracting time series from %d pixel(s) ...", len(pixel_coords))
+
     work_items = [
-        (nc_path, roi_gdf, vmin, vmax, start_date, end_date)
+        (nc_path, roi_gdf, vmin, vmax, start_date, end_date, pixel_coords)
         for nc_path in nc_paths
     ]
     total = len(work_items)
@@ -362,6 +613,222 @@ def aggregate_across_tiles(
         "vi_raw range [%.4f, %.4f]",
         len(df), valid_obs,
         float(df['vi_raw'].min()), float(df['vi_raw'].max()),
+    )
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Datacube aggregation (Layer 0 from pre-clipped datacube)
+# ---------------------------------------------------------------------------
+
+def aggregate_from_datacube(
+    dc_path: Path,
+    vi: str,
+    vmin: float,
+    vmax: float,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    n_sample: Optional[int] = None,
+    random_seed: Optional[int] = None,
+    min_ndvi_mean: Optional[float] = None,
+    min_quality_frac: float = 0.0,
+) -> pd.DataFrame:
+    """Aggregate Layer 0 observations from a pre-clipped per-pixel datacube.
+
+    Equivalent to aggregate_across_tiles() but reads from a single merged
+    datacube file instead of re-clipping source tiles.  No parallel workers
+    are needed — spatial clipping is already embedded in the datacube.
+
+    Pixel sampling (n_sample, min_ndvi_mean, min_quality_frac) is supported:
+    per-pixel temporal statistics are computed in-process from the 2D arrays
+    and the same pixel mask is applied before spatial aggregation, so the
+    result is numerically identical to the tile-based sampling path for
+    same-CRS regions.
+
+    Args:
+        dc_path:          Path to a {VI}_{region_label}_datacube.nc file.
+        vi:               VI variable name (e.g. 'NDVI').
+        vmin:             Minimum valid VI value (inclusive).
+        vmax:             Maximum valid VI value (inclusive).
+        start_date:       Optional ISO-8601 date string (YYYY-MM-DD).
+        end_date:         Optional ISO-8601 date string (YYYY-MM-DD).
+        n_sample:         Number of pixels to randomly sample; None = all pixels.
+        random_seed:      RNG seed for reproducibility; None = random.
+        min_ndvi_mean:    Exclude pixels whose temporal mean NDVI is below this.
+        min_quality_frac: Exclude pixels valid in fewer than this fraction of
+                          timesteps (0.0 = no filter).
+
+    Returns:
+        pd.DataFrame with columns [date, vi_raw, vi_count, vi_std] (Layer 0).
+        Only rows where vi_count > 0 are included (observation dates only).
+    """
+    import dask
+
+    _empty = pd.DataFrame(columns=['date', 'vi_raw', 'vi_count', 'vi_std'])
+
+    try:
+        ds = xr.open_dataset(dc_path, chunks={})
+    except Exception as e:
+        logger.error("aggregate_from_datacube: cannot open '%s': %s", dc_path.name, e)
+        return _empty
+
+    if vi not in ds:
+        logger.error(
+            "aggregate_from_datacube: variable '%s' not found in '%s' "
+            "(available: %s) — skipping.",
+            vi, dc_path.name, list(ds.data_vars),
+        )
+        return _empty
+
+    da = ds[vi]
+
+    # Apply date range filter.
+    if start_date or end_date:
+        da = da.sel(time=slice(start_date, end_date))
+    if da.sizes['time'] == 0:
+        logger.warning(
+            "aggregate_from_datacube: no time steps remain after date filtering "
+            "('%s')", dc_path.name,
+        )
+        return _empty
+
+    # Apply valid-range mask.
+    masked = da.where((da >= vmin) & (da <= vmax))
+
+    n_time = int(da.sizes['time'])
+    y_coords = np.round(da.coords['y'].values.astype(np.float64), 1)
+    x_coords = np.round(da.coords['x'].values.astype(np.float64), 1)
+
+    # ── Pixel sampling / filtering (optional) ───────────────────────────────
+    do_sampling = (
+        n_sample is not None or min_ndvi_mean is not None or min_quality_frac > 0.0
+    )
+    if do_sampling:
+        need_stats = min_ndvi_mean is not None or min_quality_frac > 0.0
+        if need_stats:
+            logger.info(
+                "  aggregate_from_datacube: computing per-pixel stats for sampling "
+                "(%s)", dc_path.name,
+            )
+            with dask.config.set(scheduler='synchronous'):
+                pixel_sum_2d   = masked.sum(dim='time', skipna=True).values    # (y, x)
+                pixel_count_2d = masked.count(dim='time').values                # (y, x)
+
+            # Build pixel_dict: {(y_r, x_r): [ndvi_sum, count, n_time]}
+            valid_iy, valid_ix = np.where(pixel_count_2d > 0)
+            pixel_dict: dict = {}
+            for iy, ix in zip(valid_iy, valid_ix):
+                key = (float(y_coords[iy]), float(x_coords[ix]))
+                pixel_dict[key] = [
+                    float(pixel_sum_2d[iy, ix]),
+                    int(pixel_count_2d[iy, ix]),
+                    n_time,
+                ]
+
+            # Apply filters.
+            eligible_keys = []
+            for key, (ndvi_sum, count, n_t) in pixel_dict.items():
+                mean_ndvi = ndvi_sum / count
+                valid_frac = count / n_t
+                if min_ndvi_mean is not None and mean_ndvi < min_ndvi_mean:
+                    continue
+                if valid_frac < min_quality_frac:
+                    continue
+                eligible_keys.append(key)
+
+            n_eligible = len(eligible_keys)
+            logger.info(
+                "  Pixel selection: %d total, %d eligible (min_ndvi_mean=%s, "
+                "min_quality_frac=%.2f)",
+                len(pixel_dict), n_eligible,
+                f"{min_ndvi_mean:.3f}" if min_ndvi_mean is not None else "none",
+                min_quality_frac,
+            )
+        else:
+            # No filters active — enumerate pixel coordinates directly from
+            # the coordinate arrays (no data read required).
+            eligible_keys = [
+                (float(y_coords[iy]), float(x_coords[ix]))
+                for iy in range(len(y_coords))
+                for ix in range(len(x_coords))
+            ]
+            n_eligible = len(eligible_keys)
+            logger.info(
+                "  Pixel selection: %d total pixels available, no filters active "
+                "(%s)", n_eligible, dc_path.name,
+            )
+
+        if n_eligible == 0:
+            logger.warning(
+                "aggregate_from_datacube: no eligible pixels after filtering — skipping."
+            )
+            return _empty
+
+        # Draw random sample if requested.
+        if n_sample is not None and n_sample < n_eligible:
+            rng = np.random.default_rng(random_seed)
+            chosen_indices = rng.choice(n_eligible, size=n_sample, replace=False)
+            pixel_coords = {eligible_keys[i] for i in chosen_indices}
+            logger.info(
+                "  Sampled %d pixels from %d eligible (seed=%s)",
+                n_sample, n_eligible,
+                str(random_seed) if random_seed is not None else "random",
+            )
+        else:
+            pixel_coords = set(eligible_keys)
+
+        # Build 2D boolean mask and apply.
+        y_to_idx = {float(y): i for i, y in enumerate(y_coords)}
+        x_to_idx = {float(x): i for i, x in enumerate(x_coords)}
+        pixel_mask_2d = np.zeros((len(y_coords), len(x_coords)), dtype=bool)
+        for (y_r, x_r) in pixel_coords:
+            iy = y_to_idx.get(y_r)
+            ix = x_to_idx.get(x_r)
+            if iy is not None and ix is not None:
+                pixel_mask_2d[iy, ix] = True
+
+        pixel_mask_da = xr.DataArray(pixel_mask_2d, dims=['y', 'x'],
+                                     coords={'y': da.coords['y'], 'x': da.coords['x']})
+        masked = masked.where(pixel_mask_da)
+
+    # ── Spatial aggregation per time step ───────────────────────────────────
+    with dask.config.set(scheduler='synchronous'):
+        agg_sum    = masked.sum(dim=['y', 'x'], skipna=True).values.astype(np.float64)
+        agg_count  = masked.count(dim=['y', 'x']).values.astype(np.int64)
+        agg_sum_sq = (masked ** 2).sum(dim=['y', 'x'], skipna=True).values.astype(np.float64)
+
+    dates = pd.to_datetime(da.coords['time'].values)
+
+    # Build Layer 0 DataFrame (observation dates only — vi_count > 0).
+    rows = []
+    for i, date in enumerate(dates):
+        n = int(agg_count[i])
+        if n == 0:
+            continue
+        s  = float(agg_sum[i])
+        sq = float(agg_sum_sq[i])
+        mean = s / n
+        if n > 1:
+            var = max((sq - n * mean ** 2) / (n - 1), 0.0)
+            std = float(np.sqrt(var))
+        else:
+            std = np.nan
+        rows.append({'date': date, 'vi_raw': float(mean), 'vi_count': n, 'vi_std': std})
+
+    if not rows:
+        logger.warning(
+            "aggregate_from_datacube: no valid observations in '%s'.", dc_path.name,
+        )
+        return _empty
+
+    df = pd.DataFrame(rows)
+    df['vi_raw']   = df['vi_raw'].astype(np.float32)
+    df['vi_count'] = df['vi_count'].astype(np.int32)
+    df['vi_std']   = df['vi_std'].astype(np.float32)
+
+    logger.info(
+        "  Datacube result: %d valid observation dates, vi_raw range [%.4f, %.4f]",
+        len(df), float(df['vi_raw'].min()), float(df['vi_raw'].max()),
     )
     return df
 
