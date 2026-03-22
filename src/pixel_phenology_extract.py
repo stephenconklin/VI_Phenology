@@ -1238,14 +1238,14 @@ def parse_args():
 
     # --- Output options ---
     parser.add_argument(
-        "--no-overview-figure", action="store_true", default=False,
+        "--no-overview-figure", dest="overview_figure", action="store_false", default=True,
         help=(
             "Skip the print-quality 19-panel overview PNG. "
             "By default an overview figure is generated for every datacube."
         ),
     )
     parser.add_argument(
-        "--no-overview-html", action="store_true", default=False,
+        "--no-overview-html", dest="overview_html", action="store_false", default=True,
         help=(
             "Skip the interactive Plotly HTML overview. "
             "By default an HTML file with hover-enabled maps is generated for every datacube."
@@ -1321,8 +1321,8 @@ def main():
             n_workers=args.workers,
             start_date=args.start_date,
             end_date=args.end_date,
-            overview_figure=not args.no_overview_figure,
-            overview_html=not args.no_overview_html,
+            overview_figure=args.overview_figure,
+            overview_html=args.overview_html,
         )
 
     logger.info("Done. All outputs written to: %s", output_dir)

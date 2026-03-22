@@ -194,10 +194,10 @@ PIXEL_MIN_VALID_OBS_PER_YEAR=5       # min valid obs per annual window; fewer â†
 PIXEL_PEAK_PROMINENCE=0.05            # min NDVI prominence for bimodality peak detection
 PIXEL_PEAK_MIN_DISTANCE=45            # min separation (days) between detected peaks
 PIXEL_SEASON_THRESHOLD=0.20           # amplitude fraction for season-length calculation
-# Set to true to skip the 19-panel print-quality overview PNG (default: false = generate it).
-PIXEL_NO_OVERVIEW_FIGURE=false
-# Set to true to skip the interactive Plotly HTML overview (default: false = generate it).
-PIXEL_NO_OVERVIEW_HTML=false
+# Set to true to generate the 19-panel print-quality overview PNG (default: true = generate it).
+PIXEL_OVERVIEW_FIGURE=true
+# Set to true to generate the interactive Plotly HTML overview (default: true = generate it).
+PIXEL_OVERVIEW_HTML=true
 
 # ==============================================================================
 # Build and run
@@ -397,12 +397,12 @@ elif [ "$PIPELINE" = "pixel_phenology" ]; then
     fi
 
     _NO_OVERVIEW_FLAG=""
-    if [ "${PIXEL_NO_OVERVIEW_FIGURE:-false}" = true ]; then
+    if [ "${PIXEL_OVERVIEW_FIGURE:-true}" = false ]; then
         _NO_OVERVIEW_FLAG="--no-overview-figure"
     fi
 
     _NO_OVERVIEW_HTML_FLAG=""
-    if [ "${PIXEL_NO_OVERVIEW_HTML:-false}" = true ]; then
+    if [ "${PIXEL_OVERVIEW_HTML:-true}" = false ]; then
         _NO_OVERVIEW_HTML_FLAG="--no-overview-html"
     fi
 
