@@ -173,7 +173,7 @@ def _write_overview_figure(
     Reads the already-written output NetCDF and summary CSV to avoid keeping
     the large out_array in memory. Returns the path to the saved PNG.
     """
-    FILL = _FILL_F4 * 0.9  # threshold for masking fill pixels
+    FILL = _FILL_F4 * 0.9
 
     # ── Load data ─────────────────────────────────────────────────────────
     bands = {}
@@ -188,61 +188,75 @@ def _write_overview_figure(
     stats = pd.read_csv(summary_csv_path).set_index("metric")
     extent = [x.min(), x.max(), y.min(), y.max()]
 
+    # ── Aspect ratio ──────────────────────────────────────────────────────
+    # Compute the true geographic aspect ratio (height : width in metres).
+    # Cap the display aspect at MAX_PANEL_AR so the figure stays practical.
+    # imshow aspect = display_ar / geo_ar  (< 1 compresses the y-axis for
+    # very elongated regions; = 1 means geographic equal-axis display).
+    geo_ar = (y.max() - y.min()) / max(x.max() - x.min(), 1.0)
+    MAX_PANEL_AR = 3.0
+    display_ar = min(geo_ar, MAX_PANEL_AR)
+    panel_aspect = display_ar / geo_ar   # passed to ax.imshow()
+
     # ── Figure geometry ───────────────────────────────────────────────────
-    N_COLS, N_ROWS = 4, 5          # 20 slots: 19 metrics + 1 metadata panel
-    FIG_W, FIG_H  = 22, 28        # inches — tabloid/A1 portrait
-    fig = plt.figure(figsize=(FIG_W, FIG_H), dpi=300)
+    N_COLS, N_ROWS = 4, 5
+    FIG_W = 24.0    # inches — fixed width
+    # Estimate usable panel width after sidebar + margins + colorbars
+    panel_w_est = FIG_W * 0.78 / N_COLS
+    panel_h_est = panel_w_est * display_ar
+    # Total height: N_ROWS panels + inter-panel hspace (~60 % of a panel) +
+    # 3" for page header / footer.
+    FIG_H = panel_h_est * N_ROWS * 1.65 + 3.0
+    # Use 150 DPI when the figure is very large (keeps file size practical)
+    dpi = 150 if FIG_H > 36 else 300
+
+    fig = plt.figure(figsize=(FIG_W, FIG_H), dpi=dpi)
     fig.patch.set_facecolor("#f7f7f7")
 
-    # Outer gridspec: left sidebar (group labels) + main panel area.
-    # left=0.07 gives the sidebar and y-axis tick labels enough room so they
-    # don't bleed into each other.
+    # Outer gridspec: left sidebar + main panel area.
+    # left=0.09 keeps y-axis tick labels from bleeding over the sidebar.
     outer = gridspec.GridSpec(
         1, 2, figure=fig,
-        width_ratios=[0.030, 0.970],
-        left=0.07, right=0.97,
-        top=0.93, bottom=0.03,
-        wspace=0.02,
+        width_ratios=[0.028, 0.972],
+        left=0.09, right=0.97,
+        top=0.97, bottom=0.01,
+        wspace=0.01,
     )
-    # Main 4×5 grid
     gs = gridspec.GridSpecFromSubplotSpec(
         N_ROWS, N_COLS,
         subplot_spec=outer[1],
-        hspace=0.55, wspace=0.30,
+        hspace=0.65, wspace=0.35,
     )
 
     # ── Page header ───────────────────────────────────────────────────────
-    header_txt = (
-        f"{vi_name} Pixel Phenology — Region: {region_label}"
+    aspect_note = (
+        f"Display aspect {display_ar:.1f}:1  |  "
+        f"True geographic aspect {geo_ar:.1f}:1"
+        if geo_ar > MAX_PANEL_AR else
+        f"Geographic aspect {geo_ar:.1f}:1 (no compression)"
     )
-    sub_txt = (
-        f"Whittaker λ={config['smooth_lambda']:.0f}  |  "
-        f"min obs={config['min_valid_obs']}  |  "
-        f"season threshold={config['season_threshold']:.2f}  |  "
-        f"peak prominence={config['peak_prominence']:.2f}  |  "
-        f"Generated {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}"
-    )
-    fig.text(0.50, 0.965, header_txt, ha="center", va="bottom",
-             fontsize=20, fontweight="bold", color="#1a1a1a")
-    fig.text(0.50, 0.955, sub_txt, ha="center", va="bottom",
-             fontsize=7.5, color="#555555")
+    fig.text(0.50, 0.988, f"{vi_name} Pixel Phenology — Region: {region_label}",
+             ha="center", va="top", fontsize=18, fontweight="bold", color="#1a1a1a")
+    fig.text(0.50, 0.982,
+             f"Whittaker λ={config['smooth_lambda']:.0f}  |  "
+             f"min obs={config['min_valid_obs']}  |  "
+             f"season threshold={config['season_threshold']:.2f}  |  "
+             f"peak prominence={config['peak_prominence']:.2f}  |  "
+             f"{aspect_note}  |  "
+             f"Generated {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}",
+             ha="center", va="top", fontsize=7, color="#555555")
 
     # ── Group sidebar ─────────────────────────────────────────────────────
-    # Map each metric to its row slot to draw sidebar rectangles
     sidebar_ax = fig.add_subplot(outer[0])
     sidebar_ax.set_xlim(0, 1)
     sidebar_ax.set_ylim(0, N_ROWS)
     sidebar_ax.axis("off")
 
-    # Count rows per group to size the sidebar bands
     group_rows = {}
-    row = 0
-    for name in METRIC_NAMES:
+    for slot, name in enumerate(METRIC_NAMES):
         g = METRIC_META[name][3]
-        group_rows.setdefault(g, []).append(row // N_COLS)
-        row += 1
+        group_rows.setdefault(g, []).append(slot // N_COLS)
 
-    # Draw one rectangle per group spanning its rows
     for g in _GROUP_ORDER:
         if g not in group_rows:
             continue
@@ -250,16 +264,15 @@ def _write_overview_figure(
         y_top    = N_ROWS - rows_in_group[0]
         y_bottom = N_ROWS - rows_in_group[-1] - 1
         rect = mpatches.FancyBboxPatch(
-            (0.05, y_bottom + 0.05), 0.90, (y_top - y_bottom) - 0.10,
+            (0.05, y_bottom + 0.04), 0.90, (y_top - y_bottom) - 0.08,
             boxstyle="round,pad=0.02",
-            facecolor=_GROUP_COLORS[g], edgecolor="#aaaaaa", linewidth=0.5,
+            facecolor=_GROUP_COLORS[g], edgecolor="#aaaaaa", linewidth=0.6,
         )
         sidebar_ax.add_patch(rect)
         sidebar_ax.text(
-            0.50, (y_top + y_bottom) / 2,
-            g, ha="center", va="center",
-            fontsize=7, fontweight="bold", color="#333333",
-            rotation=90,
+            0.50, (y_top + y_bottom) / 2, g,
+            ha="center", va="center",
+            fontsize=7.5, fontweight="bold", color="#333333", rotation=90,
         )
 
     # ── Metric panels ─────────────────────────────────────────────────────
@@ -268,16 +281,16 @@ def _write_overview_figure(
     for idx, name in enumerate(METRIC_NAMES):
         row_i, col_i = divmod(idx, N_COLS)
         ax = fig.add_subplot(gs[row_i, col_i])
-        ax.set_facecolor("#dddddd")    # shows as grey for fully-NaN edges
+        ax.set_facecolor("#dddddd")
 
         title, unit, cmap, group, _plotly_cs = METRIC_META[name]
         data = bands[name]
 
         valid = data[~np.isnan(data)]
         if len(valid) == 0:
-            ax.set_title(title, fontsize=6.5, fontweight="bold", pad=3)
+            ax.set_title(title, fontsize=7, fontweight="bold", pad=3)
             ax.text(0.5, 0.5, "No valid data", transform=ax.transAxes,
-                    ha="center", va="center", fontsize=7, color="#888888")
+                    ha="center", va="center", fontsize=8, color="#888888")
             ax.axis("off")
             continue
 
@@ -289,39 +302,36 @@ def _write_overview_figure(
         im = ax.imshow(
             data, origin="upper", extent=extent,
             cmap=cmap, vmin=vmin, vmax=vmax,
-            interpolation="nearest", aspect="auto",
+            interpolation="nearest", aspect=panel_aspect,
         )
 
-        # Colorbar
-        cb = fig.colorbar(im, ax=ax, fraction=0.038, pad=0.02, shrink=0.88)
-        cb.set_label(unit, fontsize=6, labelpad=2)
-        cb.ax.tick_params(labelsize=5.5)
+        cb = fig.colorbar(im, ax=ax, fraction=0.036, pad=0.02, shrink=0.90)
+        cb.set_label(unit, fontsize=6.5, labelpad=2)
+        cb.ax.tick_params(labelsize=6)
         cb.ax.yaxis.set_major_locator(plt.MaxNLocator(nbins=5))
 
-        # Title
-        ax.set_title(title, fontsize=6.8, fontweight="bold", pad=3,
-                     color="#1a1a1a")
+        ax.set_title(title, fontsize=7.5, fontweight="bold", pad=4, color="#1a1a1a")
 
-        # Subtitle: spatial mean ± std from summary CSV
         if name in stats.index:
             row_s = stats.loc[name]
             sub = (f"μ={row_s['mean']:.3g}  σ={row_s['std']:.3g}  "
                    f"n={int(row_s['n_valid_pixels']):,}")
         else:
             sub = ""
-        ax.set_xlabel(sub, fontsize=5.5, color="#444444", labelpad=2)
+        ax.set_xlabel(sub, fontsize=6, color="#444444", labelpad=3)
 
-        # Axis formatting
         ax.xaxis.set_major_formatter(km_fmt)
         ax.yaxis.set_major_formatter(km_fmt)
-        ax.tick_params(labelsize=5, length=2, pad=1)
-        # Only label y-axis on left-column panels to avoid crowding the sidebar
+        ax.tick_params(labelsize=5.5, length=2, pad=1)
+
+        # Tick labels only on the leftmost column; ylabel only there too.
+        # This prevents y-tick numbers from bleeding over the group sidebar.
         if col_i == 0:
-            ax.set_ylabel("Northing (m)", fontsize=5, labelpad=1)
+            ax.set_ylabel("Northing (km)", fontsize=6, labelpad=2)
         else:
+            ax.tick_params(labelleft=False)
             ax.set_ylabel("")
 
-        # Group background tint on panel face
         ax.set_facecolor(_GROUP_COLORS[group])
 
     # ── Metadata panel (slot 20) ──────────────────────────────────────────
@@ -338,22 +348,22 @@ def _write_overview_figure(
         ("Season threshold", f"{config['season_threshold']:.2f}"),
         ("Peak prominence", f"{config['peak_prominence']:.2f}"),
         ("Peak min distance", f"{config['peak_min_distance_days']} days"),
-        ("Total metrics", "19"),
+        ("Geographic aspect", f"{geo_ar:.2f}:1"),
+        ("Display aspect", f"{display_ar:.2f}:1"),
         ("Generated (UTC)", datetime.utcnow().strftime("%Y-%m-%d %H:%M")),
     ]
-    y_pos = 0.96
-    meta_ax.text(0.5, y_pos + 0.03, "Processing Parameters",
+    y_pos = 0.97
+    meta_ax.text(0.5, y_pos, "Processing Parameters",
                  transform=meta_ax.transAxes,
-                 ha="center", va="top", fontsize=7.5, fontweight="bold",
+                 ha="center", va="top", fontsize=8, fontweight="bold",
                  color="#1a1a1a")
     for label, value in meta_lines:
-        y_pos -= 0.075
+        y_pos -= 0.073
         meta_ax.text(0.04, y_pos, f"{label}:", transform=meta_ax.transAxes,
-                     ha="left", va="top", fontsize=6, color="#555555",
+                     ha="left", va="top", fontsize=6.5, color="#555555",
                      fontweight="bold")
         meta_ax.text(0.96, y_pos, value, transform=meta_ax.transAxes,
-                     ha="right", va="top", fontsize=6, color="#1a1a1a")
-    # Thin border
+                     ha="right", va="top", fontsize=6.5, color="#1a1a1a")
     for spine in meta_ax.spines.values():
         spine.set_visible(True)
         spine.set_edgecolor("#bbbbbb")
@@ -363,7 +373,7 @@ def _write_overview_figure(
     out_fig_path = out_nc_path.parent / out_nc_path.name.replace(
         "_pixel_metrics.nc", "_pixel_metrics_overview.png"
     )
-    fig.savefig(str(out_fig_path), dpi=300, bbox_inches="tight",
+    fig.savefig(str(out_fig_path), dpi=dpi, bbox_inches="tight",
                 facecolor=fig.get_facecolor())
     plt.close(fig)
     return out_fig_path
@@ -388,9 +398,10 @@ def _write_overview_html(
 ) -> Path:
     """Render an interactive Plotly HTML overview of all 19 metric bands.
 
-    Each panel is a heatmap; hovering shows easting, northing, and the
-    metric value with its unit.  Data are spatially downsampled to keep
-    the HTML file at a manageable size.
+    2-column × 10-row layout gives each panel generous room.  Geographic
+    aspect ratio is enforced via scaleanchor so the spatial shape is correct.
+    Hovering shows easting (m), northing (m), and the metric value with unit.
+    Data are spatially downsampled to keep the HTML file manageable.
     """
     FILL = _FILL_F4 * 0.9
 
@@ -401,7 +412,7 @@ def _write_overview_html(
         x_full = np.array(ds.variables["x"][:])
         n_y, n_x = len(y_full), len(x_full)
 
-        # Compute a single downsample factor that keeps total pixels ≤ _HTML_MAX_PX
+        # Downsample so each panel ≤ _HTML_MAX_PX pixels (keeps file ~10–20 MB)
         factor = max(1, int(np.ceil(np.sqrt((n_y * n_x) / _HTML_MAX_PX))))
         y_ds = y_full[::factor]
         x_ds = x_full[::factor]
@@ -413,26 +424,49 @@ def _write_overview_html(
 
     stats = pd.read_csv(summary_csv_path).set_index("metric")
 
-    # ── Build subplot grid ────────────────────────────────────────────────
-    N_COLS, N_ROWS = 4, 5
+    # ── Geographic aspect ratio ───────────────────────────────────────────
+    geo_ar = (y_full.max() - y_full.min()) / max(x_full.max() - x_full.min(), 1.0)
+    # scaleratio for Plotly: 1 y-unit displayed as (scaleratio) × (1 x-unit).
+    # scaleratio=1 → equal geographic axes (true shape).
+    scaleratio = 1.0
+
+    # ── 2-column × 10-row layout (20 slots: 19 metrics + metadata) ───────
+    N_COLS, N_ROWS = 2, 10
+
+    # Panel pixel dimensions — height driven by geographic aspect ratio
+    PANEL_W_PX = 900
+    PANEL_H_PX = max(400, int(PANEL_W_PX * geo_ar))  # true geographic shape
+    # Cap per-panel height so the page doesn't become astronomical
+    PANEL_H_PX = min(PANEL_H_PX, 2400)
+    MARGIN_TOP  = 160
+    MARGIN_BOT  = 80
+    V_SPACING_PX = 120  # pixels between panel rows (for title + stats)
+
+    FIG_W = N_COLS * PANEL_W_PX + 300   # extra for colorbars + margins
+    FIG_H = N_ROWS * (PANEL_H_PX + V_SPACING_PX) + MARGIN_TOP + MARGIN_BOT
+
+    # ── Subplot grid titles ───────────────────────────────────────────────
     titles = []
     for name in METRIC_NAMES:
         t, unit, *_ = METRIC_META[name]
         row_s = stats.loc[name] if name in stats.index else None
-        sub = (f"μ={row_s['mean']:.3g}  σ={row_s['std']:.3g}"
+        sub = (f"μ={row_s['mean']:.3g}  σ={row_s['std']:.3g}  "
+               f"n={int(row_s['n_valid_pixels']):,}"
                if row_s is not None else "")
-        titles.append(f"<b>{t}</b><br><sup>{sub}</sup>")
-    # 20th slot = metadata
+        titles.append(f"<b>{t}</b>  <span style='font-size:11px;color:#666'>{sub}</span>")
     titles.append("<b>Processing Parameters</b>")
 
     fig = make_subplots(
         rows=N_ROWS, cols=N_COLS,
         subplot_titles=titles,
-        horizontal_spacing=0.06,
-        vertical_spacing=0.08,
+        horizontal_spacing=0.12,
+        vertical_spacing=0.055,
     )
 
-    # ── Add heatmap traces ────────────────────────────────────────────────
+    # ── Heatmap traces ────────────────────────────────────────────────────
+    # Track x/y axis names to apply scaleanchor after adding all traces
+    axis_pairs = []
+
     for idx, name in enumerate(METRIC_NAMES):
         row_i = idx // N_COLS + 1
         col_i = idx % N_COLS + 1
@@ -445,38 +479,64 @@ def _write_overview_html(
         if zmin == zmax:
             zmax = zmin + 1e-6
 
-        heatmap = go.Heatmap(
-            z=data.tolist(),
-            x=x_ds.tolist(),
-            y=y_ds.tolist(),
-            colorscale=colorscale,
-            zmin=zmin,
-            zmax=zmax,
-            colorbar=dict(
-                title=dict(text=unit, side="right", font=dict(size=8)),
-                thickness=10,
-                len=0.18,
-                x=col_i / N_COLS - 0.01,
-                y=1 - (row_i - 0.5) / N_ROWS,
-                tickfont=dict(size=8),
+        # Colorbar: positioned to the right of the panel
+        cb_x = (col_i / N_COLS) + 0.01
+        cb_y = 1.0 - (row_i - 0.5) / N_ROWS
+
+        fig.add_trace(
+            go.Heatmap(
+                z=data.tolist(),
+                x=x_ds.tolist(),
+                y=y_ds.tolist(),
+                colorscale=colorscale,
+                zmin=zmin,
+                zmax=zmax,
+                colorbar=dict(
+                    title=dict(text=unit, side="right", font=dict(size=11)),
+                    thickness=14,
+                    len=0.09,
+                    x=cb_x,
+                    y=cb_y,
+                    tickfont=dict(size=10),
+                    outlinewidth=0.5,
+                ),
+                hovertemplate=(
+                    f"<b>{title}</b><br>"
+                    "Easting: %{x:.0f} m<br>"
+                    "Northing: %{y:.0f} m<br>"
+                    f"Value: %{{z:.4g}} {unit}"
+                    "<extra></extra>"
+                ),
+                name=title,
             ),
-            hovertemplate=(
-                f"<b>{title}</b><br>"
-                "Easting: %{x:.0f} m<br>"
-                "Northing: %{y:.0f} m<br>"
-                f"Value: %{{z:.4g}} {unit}"
-                "<extra></extra>"
-            ),
-            name=title,
+            row=row_i, col=col_i,
         )
-        fig.add_trace(heatmap, row=row_i, col=col_i)
 
-        fig.update_xaxes(title_text="Easting (m)", title_font_size=7,
-                         tickfont_size=6, row=row_i, col=col_i)
-        fig.update_yaxes(title_text="Northing (m)", title_font_size=7,
-                         tickfont_size=6, row=row_i, col=col_i)
+        # Record which xaxis/yaxis pair this panel uses
+        xaxis_n = "xaxis" if (row_i == 1 and col_i == 1) else f"xaxis{(row_i-1)*N_COLS + col_i}"
+        yaxis_n = "yaxis" if (row_i == 1 and col_i == 1) else f"yaxis{(row_i-1)*N_COLS + col_i}"
+        axis_pairs.append((row_i, col_i, xaxis_n, yaxis_n))
 
-    # ── Metadata annotation (20th slot) ──────────────────────────────────
+        fig.update_xaxes(
+            title_text="Easting (m)", title_font_size=11,
+            tickfont_size=10, row=row_i, col=col_i,
+        )
+        fig.update_yaxes(
+            title_text="Northing (m)", title_font_size=11,
+            tickfont_size=10, row=row_i, col=col_i,
+        )
+
+    # ── Apply geographic equal-axis scaling ───────────────────────────────
+    # scaleanchor makes 1 northing metre = 1 easting metre in display.
+    # Combined with the computed PANEL_H_PX this gives the true geographic shape.
+    for row_i, col_i, xaxis_n, yaxis_n in axis_pairs:
+        panel_idx = (row_i - 1) * N_COLS + col_i
+        xref = "x" if panel_idx == 1 else f"x{panel_idx}"
+        fig.update_layout({
+            yaxis_n: dict(scaleanchor=xref, scaleratio=scaleratio),
+        })
+
+    # ── Metadata annotation ───────────────────────────────────────────────
     meta_lines = [
         f"<b>Region:</b> {region_label}",
         f"<b>VI:</b> {vi_name}",
@@ -487,20 +547,23 @@ def _write_overview_html(
         f"<b>Season threshold:</b> {config['season_threshold']:.2f}",
         f"<b>Peak prominence:</b> {config['peak_prominence']:.2f}",
         f"<b>Peak min dist:</b> {config['peak_min_distance_days']} days",
+        f"<b>Geographic aspect:</b> {geo_ar:.2f}:1",
         f"<b>Generated (UTC):</b> {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
     ]
+    # Place metadata in the last (20th) subplot slot — row 10, col 2
     fig.add_annotation(
         text="<br>".join(meta_lines),
-        xref="paper", yref="paper",
-        x=0.98, y=0.04,
-        xanchor="right", yanchor="bottom",
+        xref="x20" if len(METRIC_NAMES) > 1 else "x",
+        yref="y20" if len(METRIC_NAMES) > 1 else "y",
+        x=0.5, y=0.5,
+        xanchor="center", yanchor="middle",
         showarrow=False,
-        font=dict(size=9, color="#333333"),
+        font=dict(size=12, color="#333333"),
         align="left",
         bgcolor="#f0f0f0",
         bordercolor="#aaaaaa",
         borderwidth=1,
-        borderpad=8,
+        borderpad=12,
     )
 
     # ── Layout ────────────────────────────────────────────────────────────
@@ -508,19 +571,21 @@ def _write_overview_html(
         title=dict(
             text=(
                 f"<b>{vi_name} Pixel Phenology — Region: {region_label}</b><br>"
-                f"<sup>Whittaker λ={config['smooth_lambda']:.0f}  |  "
+                f"<sup style='font-size:12px'>Whittaker λ={config['smooth_lambda']:.0f}  |  "
                 f"min obs={config['min_valid_obs']}  |  "
-                f"Hover any panel for pixel values</sup>"
+                f"geographic aspect {geo_ar:.1f}:1  |  "
+                f"hover any panel for pixel coordinates and values</sup>"
             ),
             x=0.5, xanchor="center",
-            font=dict(size=16),
+            font=dict(size=20),
+            pad=dict(t=20),
         ),
-        height=1800,
-        width=1600,
+        height=FIG_H,
+        width=FIG_W,
         paper_bgcolor="#f7f7f7",
         plot_bgcolor="#eeeeee",
         showlegend=False,
-        font=dict(family="Arial, sans-serif"),
+        font=dict(family="Arial, sans-serif", size=12),
     )
 
     out_html_path = out_nc_path.parent / out_nc_path.name.replace(
