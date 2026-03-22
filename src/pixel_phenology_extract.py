@@ -74,6 +74,11 @@ _MEM_WARN_GB = 8.0
 # Number of y-rows per thread chunk.
 _Y_CHUNK_ROWS = 50
 
+# Standard NetCDF4 fill value for float32. Using np.nan as _FillValue causes
+# NaN != NaN comparison failures in tools like Panoply, making all pixels appear
+# missing. This value is the CF/NetCDF4 convention for float32 missing data.
+_FILL_F4 = np.float32(9.96920996838687e+36)
+
 # Ordered list of the 18 output metric names.
 METRIC_NAMES = [
     "peak_ndvi_mean",
@@ -562,9 +567,11 @@ def process_datacube(
         for im, name in enumerate(METRIC_NAMES):
             v = ncout.createVariable(
                 name, "f4", (y_dim, x_dim),
-                zlib=True, complevel=4, fill_value=np.float32(np.nan),
+                zlib=True, complevel=4, fill_value=_FILL_F4,
             )
-            v[:] = out_array[im]
+            band = out_array[im].copy()
+            band[np.isnan(band)] = _FILL_F4
+            v[:] = band
             v.long_name = name
             v.grid_mapping = "spatial_ref"
 
