@@ -281,7 +281,6 @@ def _write_overview_figure(
     for idx, name in enumerate(METRIC_NAMES):
         row_i, col_i = divmod(idx, N_COLS)
         ax = fig.add_subplot(gs[row_i, col_i])
-        ax.set_facecolor("#dddddd")
 
         title, unit, cmap, group, _plotly_cs = METRIC_META[name]
         data = bands[name]
@@ -332,7 +331,7 @@ def _write_overview_figure(
             ax.tick_params(labelleft=False)
             ax.set_ylabel("")
 
-        ax.set_facecolor(_GROUP_COLORS[group])
+        ax.set_facecolor("white")
 
     # ── Metadata panel (slot 20) ──────────────────────────────────────────
     meta_ax = fig.add_subplot(gs[4, 3])
@@ -460,7 +459,7 @@ def _write_overview_html(
     fig = make_subplots(
         rows=N_ROWS, cols=N_COLS,
         subplot_titles=titles,
-        horizontal_spacing=0.12,
+        horizontal_spacing=0.22,
         vertical_spacing=V_SPACING_FRAC,
     )
 
