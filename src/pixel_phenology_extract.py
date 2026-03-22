@@ -474,12 +474,19 @@ def process_datacube(
     )
     ndvi_np = da.values.astype(np.float32)  # shape: (time, y, x)
 
-    # Build Whittaker penalty matrix once for the full time axis.
+    # Build Whittaker penalty matrix once for the daily grid (not n_time).
+    # n_days = calendar days from first to last acquisition; always >= n_time since
+    # HLS does not observe every day. W in _whittaker_smooth_pixel has size n_days,
+    # so lam_DTD must match that dimension.
+    n_days = (times[-1] - times[0]).days + 1
     lam = config["smooth_lambda"]
-    if n_time >= 3:
+    if n_days >= 3:
         try:
-            lam_DTD = _build_whittaker_system(n_time, lam)
-            logger.debug("Built Whittaker D^T D matrix: n=%d, λ=%.1f", n_time, lam)
+            lam_DTD = _build_whittaker_system(n_days, lam)
+            logger.debug(
+                "Built Whittaker D^T D matrix: n_days=%d, n_time=%d, λ=%.1f",
+                n_days, n_time, lam,
+            )
         except Exception as exc:
             logger.warning("Could not build Whittaker matrix (%s); using linear fill.", exc)
             lam_DTD = None
