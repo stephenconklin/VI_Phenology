@@ -635,25 +635,26 @@ def _whittaker_smooth_pixel(
 
 def _extract_pixel_metrics(
     pixel_ts: np.ndarray,
-    times: pd.DatetimeIndex,
     lam_DTD,
     config: dict,
+    date_cache: dict,
 ) -> dict:
-    """Compute all 18 phenological metrics for one pixel time series.
+    """Compute all 19 phenological metrics for one pixel time series.
 
     Args:
-        pixel_ts: float32/float64 array of shape (n_time,); NaN = masked.
-        times:    DatetimeIndex aligned with pixel_ts.
-        lam_DTD:  precomputed Whittaker penalty matrix (shared across pixels).
-        config:   dict with keys: min_valid_obs, min_valid_obs_per_year, vi_min, vi_max,
-                  peak_prominence, peak_min_distance_days, season_threshold.
+        pixel_ts:   float64 array of shape (n_time,); NaN = masked.
+        lam_DTD:    precomputed Whittaker penalty matrix (shared across pixels).
+        config:     dict with keys: min_valid_obs, min_valid_obs_per_year, vi_min, vi_max,
+                    peak_prominence, peak_min_distance_days, season_threshold.
+        date_cache: precomputed date structures (n_days, day_offsets, year_arr,
+                    doy_arr, years, year_masks) — built once per datacube.
 
     Returns:
         dict of metric_name → float scalar (np.nan if not computable).
     """
     nan_result = {k: np.nan for k in METRIC_NAMES}
 
-    # Validity check.
+    # ── Validity check ────────────────────────────────────────────────────
     vi_min = config["vi_min"]
     vi_max = config["vi_max"]
     valid_mask = (
@@ -664,47 +665,48 @@ def _extract_pixel_metrics(
     if valid_mask.sum() < config["min_valid_obs"]:
         return nan_result
 
-    # Coefficient of variation from raw observations (whole-series).
-    raw_vals = pixel_ts[valid_mask].astype(np.float64)
+    # ── CV from raw observations (whole-series) ───────────────────────────
+    raw_vals = pixel_ts[valid_mask]
     mean_raw = float(np.mean(raw_vals))
     cv = float(np.std(raw_vals) / mean_raw) if mean_raw > 0 else np.nan
 
-    # Map observations onto the daily grid spanning the full time axis.
-    start_date = times[0]
-    end_date = times[-1]
-    n_days = (end_date - start_date).days + 1
-    all_dates = pd.date_range(start=start_date, end=end_date, freq='D')
+    # ── Vectorised obs → daily grid mapping ──────────────────────────────
+    # day_offsets maps each observation to its integer position in the daily
+    # grid. np.add.at accumulates duplicate-date values; dividing by count
+    # gives the per-day mean (equivalent to the previous sequential mean).
+    n_days      = date_cache["n_days"]
+    day_offsets = date_cache["day_offsets"]
 
-    daily_y = np.zeros(n_days, dtype=np.float64)
-    daily_w = np.zeros(n_days, dtype=np.float64)
+    valid_days = day_offsets[valid_mask]
+    valid_vals = pixel_ts[valid_mask]
 
-    for t_idx, ts in enumerate(times):
-        if valid_mask[t_idx]:
-            d = (ts - start_date).days
-            if daily_w[d] > 0:
-                # Same-day duplicate — take mean.
-                daily_y[d] = (daily_y[d] + float(pixel_ts[t_idx])) / 2.0
-            else:
-                daily_y[d] = float(pixel_ts[t_idx])
-                daily_w[d] = 1.0
+    daily_y   = np.zeros(n_days, dtype=np.float64)
+    daily_w   = np.zeros(n_days, dtype=np.float64)
+    day_count = np.zeros(n_days, dtype=np.float64)
+    np.add.at(daily_y,   valid_days, valid_vals)
+    np.add.at(day_count, valid_days, 1.0)
+    hit = day_count > 0
+    daily_y[hit] /= day_count[hit]
+    daily_w[hit]  = 1.0
 
-    # Whittaker smooth.
+    # ── Whittaker smooth ──────────────────────────────────────────────────
     if n_days < 3 or lam_DTD is None:
-        # Fallback: linear interpolation between observations.
         smoothed = daily_y.copy()
     else:
         smoothed = _whittaker_smooth_pixel(daily_y, daily_w, lam_DTD)
         smoothed = np.clip(smoothed, vi_min, vi_max)
 
-    # Build a date-indexed DataFrame for the smoothed series.
-    smooth_df = pd.DataFrame({
-        "date": all_dates,
-        "ndvi": smoothed.astype(np.float32),
-    }).set_index("date")
+    # ── Per-year metrics via precomputed numpy masks ──────────────────────
+    # Avoids constructing a pd.DataFrame + DatetimeIndex per pixel.
+    doy_arr   = date_cache["doy_arr"]
+    years     = date_cache["years"]
+    year_masks = date_cache["year_masks"]
 
-    years = sorted(smooth_df.index.year.unique())
+    peak_prominence  = config["peak_prominence"]
+    peak_min_dist    = config["peak_min_distance_days"]
+    season_thr       = config["season_threshold"]
+    min_obs_per_year = config["min_valid_obs_per_year"]
 
-    # Per-year accumulators.
     annual = {
         "peak_ndvi":   [],
         "peak_doy":    [],
@@ -719,35 +721,30 @@ def _extract_pixel_metrics(
         "valley":      [],
     }
 
-    peak_prominence = config["peak_prominence"]
-    peak_min_dist = config["peak_min_distance_days"]
-    season_thr = config["season_threshold"]
-    min_obs_per_year = config["min_valid_obs_per_year"]
-
     for yr in years:
-        yr_s = smooth_df[smooth_df.index.year == yr]["ndvi"]
-        if len(yr_s) < 30:
+        mask = year_masks[int(yr)]
+        y    = smoothed[mask]
+        if len(y) < 30:
             continue
 
-        # Count valid observations in this annual window; skip if too sparse.
-        yr_obs = int(daily_w[all_dates.year == yr].sum())
-        if yr_obs < min_obs_per_year:
+        # Count valid observations in this annual window.
+        if int(daily_w[mask].sum()) < min_obs_per_year:
             continue
 
-        y = yr_s.values.astype(np.float64)
-        doys = yr_s.index.dayofyear.values
+        y    = y.astype(np.float64)
+        doys = doy_arr[mask]
 
         # Peak.
         peak_idx = int(np.argmax(y))
         annual["peak_ndvi"].append(float(y[peak_idx]))
         annual["peak_doy"].append(int(doys[peak_idx]))
 
-        # Integrated NDVI (trapezoidal, using integer day indices as x-axis).
+        # Integrated NDVI (trapezoidal, integer day steps as x-axis).
         annual["integrated"].append(float(np.trapezoid(y)))
 
         # Floor and ceiling from the curve (no DOY windows).
         floor_val = float(np.nanmin(y))
-        ceil_val = float(np.nanmax(y))
+        ceil_val  = float(np.nanmax(y))
         annual["floor"].append(floor_val)
         annual["ceiling"].append(ceil_val)
 
@@ -760,14 +757,14 @@ def _extract_pixel_metrics(
             annual["greenup"].append(rate)
 
         # Season length: days above floor + season_thr * amplitude.
+        # Use integer indices into the daily grid — each step equals 1 day.
         amplitude = ceil_val - floor_val
         if amplitude >= _MIN_AMPLITUDE:
-            threshold = floor_val + season_thr * amplitude
-            above_dates = yr_s.index[y >= threshold]
-            if len(above_dates) >= 2:
-                annual["season_len"].append(
-                    float((above_dates[-1] - above_dates[0]).days)
-                )
+            threshold  = floor_val + season_thr * amplitude
+            yr_indices = np.where(mask)[0]
+            above      = yr_indices[y >= threshold]
+            if len(above) >= 2:
+                annual["season_len"].append(float(above[-1] - above[0]))
 
         # Bimodality.
         peaks, _ = _find_peaks(y, prominence=peak_prominence, distance=peak_min_dist)
@@ -783,7 +780,7 @@ def _extract_pixel_metrics(
             if max(h1, h2) > 0:
                 annual["rel_amp"].append(float(min(h1, h2) / max(h1, h2)))
             lo, hi = min(p1, p2), max(p1, p2)
-            valley = float(np.nanmin(y[lo : hi + 1]))
+            valley  = float(np.nanmin(y[lo : hi + 1]))
             mean_pk = (h1 + h2) / 2.0
             if mean_pk > 0:
                 annual["valley"].append(float((mean_pk - valley) / mean_pk))
@@ -834,23 +831,24 @@ def _extract_pixel_metrics(
 
 def _process_y_chunk(
     ndvi_chunk: np.ndarray,
-    times: pd.DatetimeIndex,
     lam_DTD,
     config: dict,
+    date_cache: dict,
 ) -> np.ndarray:
     """Process all pixels in a y-row chunk.
 
     Args:
-        ndvi_chunk: float32 array of shape (n_time, n_y_chunk, n_x).
-        times:      DatetimeIndex of length n_time.
-        lam_DTD:    precomputed Whittaker penalty matrix.
-        config:     per-pixel config dict.
+        ndvi_chunk:  float32 array of shape (n_time, n_y_chunk, n_x).
+        lam_DTD:     precomputed Whittaker penalty matrix.
+        config:      per-pixel config dict.
+        date_cache:  precomputed date structures shared across all pixels
+                     (n_days, day_offsets, year_arr, doy_arr, years, year_masks).
 
     Returns:
         float32 array of shape (n_metrics, n_y_chunk, n_x).
     """
     n_metrics = len(METRIC_NAMES)
-    n_time, n_y, n_x = ndvi_chunk.shape
+    _n_time, n_y, n_x = ndvi_chunk.shape
     out = np.full((n_metrics, n_y, n_x), np.nan, dtype=np.float32)
 
     for iy in range(n_y):
@@ -858,7 +856,7 @@ def _process_y_chunk(
             pixel_ts = ndvi_chunk[:, iy, ix].astype(np.float64)
             if np.all(np.isnan(pixel_ts)):
                 continue
-            metrics = _extract_pixel_metrics(pixel_ts, times, lam_DTD, config)
+            metrics = _extract_pixel_metrics(pixel_ts, lam_DTD, config, date_cache)
             for im, name in enumerate(METRIC_NAMES):
                 out[im, iy, ix] = metrics.get(name, np.nan)
 
@@ -969,6 +967,31 @@ def process_datacube(
     # so lam_DTD must match that dimension.
     n_days = (times[-1] - times[0]).days + 1
     lam = config["smooth_lambda"]
+
+    # ── Precompute shared date structures (computed once; passed to every pixel) ──
+    # Avoids rebuilding pd.date_range, year masks, and DOY arrays inside the
+    # per-pixel hot loop — which previously ran once per pixel.
+    _all_dates = pd.date_range(start=times[0], periods=n_days, freq="D")
+    _year_arr  = _all_dates.year.values.astype(np.int32)
+    _doy_arr   = _all_dates.dayofyear.values.astype(np.int16)
+    _years     = np.unique(_year_arr)
+    # Integer day offset of each observation from time-axis start.
+    _day_offsets = np.array(
+        [(pd.Timestamp(t) - pd.Timestamp(times[0])).days for t in times],
+        dtype=np.int32,
+    )
+    date_cache = {
+        "n_days":      n_days,
+        "year_arr":    _year_arr,
+        "doy_arr":     _doy_arr,
+        "years":       _years,
+        "year_masks":  {int(yr): (_year_arr == yr) for yr in _years},
+        "day_offsets": _day_offsets,
+    }
+    logger.debug(
+        "Date cache: n_days=%d, n_years=%d, n_time=%d",
+        n_days, len(_years), n_time,
+    )
     if n_days >= 3:
         try:
             lam_DTD = _build_whittaker_system(n_days, lam)
@@ -1007,7 +1030,7 @@ def process_datacube(
                 chunk_end = min(chunk_start + _Y_CHUNK_ROWS, n_y)
                 ndvi_chunk = ndvi_np[:, chunk_start:chunk_end, :]
                 future = executor.submit(
-                    _process_y_chunk, ndvi_chunk, times, lam_DTD, per_pixel_cfg
+                    _process_y_chunk, ndvi_chunk, lam_DTD, per_pixel_cfg, date_cache
                 )
                 futures[future] = (chunk_start, chunk_end)
 
