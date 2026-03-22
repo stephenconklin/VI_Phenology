@@ -134,4 +134,4 @@ with code generation and refinement under the direction and review of the author
 
 ## License
 
-MIT
+[MIT License](LICENSE) · Copyright (c) 2026 Stephen Conklin
