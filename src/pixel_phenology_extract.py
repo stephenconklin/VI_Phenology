@@ -204,11 +204,11 @@ def _write_overview_figure(
     # Estimate usable panel width after sidebar + margins + colorbars
     panel_w_est = FIG_W * 0.78 / N_COLS
     panel_h_est = panel_w_est * display_ar
-    # Total height: N_ROWS panels + inter-panel hspace (~60 % of a panel) +
-    # 3" for page header / footer.
-    FIG_H = panel_h_est * N_ROWS * 1.65 + 3.0
-    # Use 150 DPI when the figure is very large (keeps file size practical)
-    dpi = 150 if FIG_H > 36 else 300
+    # hspace=0.38 adds ~38% of one panel height between rows (titles + stats).
+    # Total = N_ROWS panels + (N_ROWS-1) gaps + 2" header/footer.
+    FIG_H = min(panel_h_est * N_ROWS * 1.38 + 2.0, 44.0)
+    # Use 150 DPI when the figure is large (keeps file size practical)
+    dpi = 150 if FIG_H > 22 else 300
 
     fig = plt.figure(figsize=(FIG_W, FIG_H), dpi=dpi)
     fig.patch.set_facecolor("#f7f7f7")
@@ -225,7 +225,7 @@ def _write_overview_figure(
     gs = gridspec.GridSpecFromSubplotSpec(
         N_ROWS, N_COLS,
         subplot_spec=outer[1],
-        hspace=0.65, wspace=0.35,
+        hspace=0.38, wspace=0.35,
     )
 
     # ── Page header ───────────────────────────────────────────────────────
@@ -426,24 +426,25 @@ def _write_overview_html(
 
     # ── Geographic aspect ratio ───────────────────────────────────────────
     geo_ar = (y_full.max() - y_full.min()) / max(x_full.max() - x_full.min(), 1.0)
-    # scaleratio for Plotly: 1 y-unit displayed as (scaleratio) × (1 x-unit).
-    # scaleratio=1 → equal geographic axes (true shape).
-    scaleratio = 1.0
 
     # ── 2-column × 10-row layout (20 slots: 19 metrics + metadata) ───────
     N_COLS, N_ROWS = 2, 10
 
-    # Panel pixel dimensions — height driven by geographic aspect ratio
+    # Panel pixel dimensions — height driven by geographic aspect ratio.
+    # vertical_spacing=0.02 means 0.02*(N_ROWS-1)=18% of figure for gaps;
+    # each panel gets (1-0.18)/N_ROWS ≈ 8.2% of figure height.
+    V_SPACING_FRAC = 0.02
+    PANEL_FRAC = (1.0 - V_SPACING_FRAC * (N_ROWS - 1)) / N_ROWS  # ~0.082
     PANEL_W_PX = 900
-    PANEL_H_PX = max(400, int(PANEL_W_PX * geo_ar))  # true geographic shape
-    # Cap per-panel height so the page doesn't become astronomical
-    PANEL_H_PX = min(PANEL_H_PX, 2400)
-    MARGIN_TOP  = 160
-    MARGIN_BOT  = 80
-    V_SPACING_PX = 120  # pixels between panel rows (for title + stats)
+    PANEL_H_PX = max(350, int(PANEL_W_PX * geo_ar))
+    PANEL_H_PX = min(PANEL_H_PX, 1800)
+    MARGIN_TOP  = 140
+    MARGIN_BOT  = 60
 
-    FIG_W = N_COLS * PANEL_W_PX + 300   # extra for colorbars + margins
-    FIG_H = N_ROWS * (PANEL_H_PX + V_SPACING_PX) + MARGIN_TOP + MARGIN_BOT
+    FIG_W = N_COLS * PANEL_W_PX + 280   # extra for colorbars + margins
+    FIG_H = int(PANEL_H_PX / PANEL_FRAC) + MARGIN_TOP + MARGIN_BOT
+    # Colorbar length as a fraction of figure height — sized to ~80% of one panel
+    CB_LEN = PANEL_FRAC * 0.80
 
     # ── Subplot grid titles ───────────────────────────────────────────────
     titles = []
@@ -460,13 +461,10 @@ def _write_overview_html(
         rows=N_ROWS, cols=N_COLS,
         subplot_titles=titles,
         horizontal_spacing=0.12,
-        vertical_spacing=0.055,
+        vertical_spacing=V_SPACING_FRAC,
     )
 
     # ── Heatmap traces ────────────────────────────────────────────────────
-    # Track x/y axis names to apply scaleanchor after adding all traces
-    axis_pairs = []
-
     for idx, name in enumerate(METRIC_NAMES):
         row_i = idx // N_COLS + 1
         col_i = idx % N_COLS + 1
@@ -479,7 +477,8 @@ def _write_overview_html(
         if zmin == zmax:
             zmax = zmin + 1e-6
 
-        # Colorbar: positioned to the right of the panel
+        # Colorbar: anchored to the right edge of the column, vertically
+        # centered on the panel row.
         cb_x = (col_i / N_COLS) + 0.01
         cb_y = 1.0 - (row_i - 0.5) / N_ROWS
 
@@ -494,7 +493,7 @@ def _write_overview_html(
                 colorbar=dict(
                     title=dict(text=unit, side="right", font=dict(size=11)),
                     thickness=14,
-                    len=0.09,
+                    len=CB_LEN,
                     x=cb_x,
                     y=cb_y,
                     tickfont=dict(size=10),
@@ -512,11 +511,6 @@ def _write_overview_html(
             row=row_i, col=col_i,
         )
 
-        # Record which xaxis/yaxis pair this panel uses
-        xaxis_n = "xaxis" if (row_i == 1 and col_i == 1) else f"xaxis{(row_i-1)*N_COLS + col_i}"
-        yaxis_n = "yaxis" if (row_i == 1 and col_i == 1) else f"yaxis{(row_i-1)*N_COLS + col_i}"
-        axis_pairs.append((row_i, col_i, xaxis_n, yaxis_n))
-
         fig.update_xaxes(
             title_text="Easting (m)", title_font_size=11,
             tickfont_size=10, row=row_i, col=col_i,
@@ -526,15 +520,11 @@ def _write_overview_html(
             tickfont_size=10, row=row_i, col=col_i,
         )
 
-    # ── Apply geographic equal-axis scaling ───────────────────────────────
-    # scaleanchor makes 1 northing metre = 1 easting metre in display.
-    # Combined with the computed PANEL_H_PX this gives the true geographic shape.
-    for row_i, col_i, xaxis_n, yaxis_n in axis_pairs:
-        panel_idx = (row_i - 1) * N_COLS + col_i
-        xref = "x" if panel_idx == 1 else f"x{panel_idx}"
-        fig.update_layout({
-            yaxis_n: dict(scaleanchor=xref, scaleratio=scaleratio),
-        })
+    # Geographic shape is approximated by PANEL_H_PX = PANEL_W_PX * geo_ar.
+    # scaleanchor is intentionally omitted here — when set, Plotly expands the
+    # plot domain to satisfy the equal-axis constraint, inflating row height and
+    # making colorbars span the full expanded space.  The aspect is already
+    # baked into the figure dimensions.
 
     # ── Metadata annotation ───────────────────────────────────────────────
     meta_lines = [
