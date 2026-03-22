@@ -456,12 +456,20 @@ def _write_overview_html(
         titles.append(f"<b>{t}</b>  <span style='font-size:11px;color:#666'>{sub}</span>")
     titles.append("<b>Processing Parameters</b>")
 
+    H_SPACING = 0.22
     fig = make_subplots(
         rows=N_ROWS, cols=N_COLS,
         subplot_titles=titles,
-        horizontal_spacing=0.22,
+        horizontal_spacing=H_SPACING,
         vertical_spacing=V_SPACING_FRAC,
     )
+
+    # Pre-compute the right edge of each column in paper coordinates so
+    # colorbars are placed flush against their panel rather than at the
+    # column midpoint.  With N_COLS columns and H_SPACING between them:
+    #   col_width  = (1 - H_SPACING) / N_COLS
+    #   right_edge = col_i * col_width + (col_i - 1) * H_SPACING
+    _col_w = (1.0 - H_SPACING) / N_COLS
 
     # ── Heatmap traces ────────────────────────────────────────────────────
     for idx, name in enumerate(METRIC_NAMES):
@@ -476,9 +484,8 @@ def _write_overview_html(
         if zmin == zmax:
             zmax = zmin + 1e-6
 
-        # Colorbar: anchored to the right edge of the column, vertically
-        # centered on the panel row.
-        cb_x = (col_i / N_COLS) + 0.01
+        # Colorbar: flush against the right edge of its column.
+        cb_x = col_i * _col_w + (col_i - 1) * H_SPACING + 0.01
         cb_y = 1.0 - (row_i - 0.5) / N_ROWS
 
         fig.add_trace(
