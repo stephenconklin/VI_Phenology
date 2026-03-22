@@ -6,17 +6,17 @@
 # ── Pipeline ───────────────────────────────────────────────────────────────────
 # phenology        → ROI-mean time series, smoothing, metrics, plots
 # netcdf_datacube  → CF-1.8 per-pixel datacubes clipped to polygon regions
-# pixel_phenology  → per-pixel metric maps from existing datacubes (18 metrics)
-PIPELINE="phenology"
+# pixel_phenology  → per-pixel metric maps from existing datacubes (19 metrics)
+# PIPELINE="phenology"
 # PIPELINE="netcdf_datacube"
-# PIPELINE="pixel_phenology"
+PIPELINE="pixel_phenology"
 
 # ==============================================================================
 # Shared inputs  (all three pipelines)
 # ==============================================================================
 
 # ── Output ─────────────────────────────────────────────────────────────────────
-OUTPUT_DIR="/Volumes/ConklinGeospatialData/Data/BioSCape_SA_LVIS/VI_Phenology/phenology_smooth_500"
+OUTPUT_DIR="/Volumes/ConklinGeospatialData/Data/Durango_HLS_VI/VI_Phenology/pixel_phenology_whittaker_100"
 
 # ── Valid ranges (min,max) ─────────────────────────────────────────────────────
 VALID_RANGE_NDVI="-1,1"
@@ -34,6 +34,12 @@ WORKERS=8    # Parallel worker processes for tile extraction; set to 1 to disabl
 
 # ==============================================================================
 # phenology + netcdf_datacube pipeline inputs  (not used by pixel_phenology)
+# ============================================================================== 
+#      NOTE: "Datacube input mode" under the phenology pipeline settings is an
+#             optional alternative to NETCDF_DIR + SHAPEFILE when running only
+#             the phenology pipeline. "Datacube input mode" is also preferable
+#             when no shapefile input is possible, and when the entire netCDF
+#             input file should be processed.
 # ==============================================================================
 
 # ── Source NetCDF directory ────────────────────────────────────────────────────
@@ -93,10 +99,10 @@ MERGE_CROSS_CRS=true   # true = reproject + merge into one datacube (default)
 # ==============================================================================
 
 # ── Smoothing ──────────────────────────────────────────────────────────────────
-SMOOTH_METHOD="whittaker"                # savgol | loess | linear | harmonic | whittaker | none
+SMOOTH_METHOD="whittaker"             # savgol | loess | linear | harmonic | whittaker | none
+SMOOTH_LAMBDA=100                     # Whittaker only: smoothing strength (10–1000; higher = smoother)
 SMOOTH_WINDOW=15                      # days (savgol, loess)
 SMOOTH_POLYORDER=3                    # savgol only
-SMOOTH_LAMBDA=10                     # Whittaker only: smoothing strength (10–1000; higher = smoother)
 
 # ── Metrics ────────────────────────────────────────────────────────────────────
 COMPUTE_METRICS=false                  # true | false
@@ -132,7 +138,7 @@ MIN_VALID_OBS_PER_YEAR=5             # min valid obs per annual window; fewer �
 #   File path(s) — space-separated list of individual datacube files.
 #                 INPUT_DATACUBES="/path/to/NDVI_G5_1_datacube.nc /path/to/NDVI_G5_12_datacube.nc"
 #
-INPUT_DATACUBES="/Volumes/ConklinGeospatialData/Data/BioSCape_SA_LVIS/VI_Phenology/netcdf_datacube"
+INPUT_DATACUBES="/Volumes/ConklinGeospatialData/Data/Durango_HLS_VI/2_Interim/2_NetCDF/NDVI_T13SBB_datacube.nc"
 
 # ── Pixel sampling (optional) ──────────────────────────────────────────────────
 # Randomly sample N pixels per region and use them consistently across the full
@@ -141,20 +147,20 @@ INPUT_DATACUBES="/Volumes/ConklinGeospatialData/Data/BioSCape_SA_LVIS/VI_Phenolo
 #
 # Leave any of these commented out to disable that filter and use all valid pixels.
 #
-SAMPLE_PIXELS=10          # N random pixels per region; comment out = use all pixels
+# SAMPLE_PIXELS=200          # N random pixels per region; comment out = use all pixels
 # RANDOM_SEED=42             # reproducibility seed; comment out = random each run
 # MIN_NDVI_MEAN=0.40         # exclude pixels below this temporal mean NDVI; comment out = no filter
 # MIN_QUALITY_FRAC=0.20      # min fraction of valid timesteps to be eligible; comment out = no filter
                                # e.g. 0.20 excludes persistently cloud-covered pixels
 
 # ── Data outputs ───────────────────────────────────────────────────────────────
-SAVE_OBSERVATIONS_CSV=false    # Per-region observations-only CSV (vi_count > 0 rows only)
-SAVE_COMBINED_OUTPUTS=false    # Combined shapefile observations CSV (all regions in one file)
+SAVE_OBSERVATIONS_CSV=false   # Per-region observations-only CSV (vi_count > 0 rows only)
+SAVE_COMBINED_OUTPUTS=false   # Combined shapefile observations CSV (all regions in one file)
 
 # ── Plot outputs ───────────────────────────────────────────────────────────────
 PLOT_ANNUAL=true              # Annual DOY overlay (one curve per year + multi-year mean)
 PLOT_TIMESERIES=true          # Full calendar time-series
-PLOT_ANOMALY=true             # Anomaly (departure from multi-year mean)
+PLOT_ANOMALY=false             # Anomaly (departure from multi-year mean)
 PLOT_MULTI_VI=true            # Multi-VI comparison panel (requires >1 VI)
 PLOT_STYLE="combined"         # raw | smooth | combined
 PLOT_FORMAT="png html"        # space-separated; png and/or html
@@ -163,11 +169,17 @@ PLOT_FORMAT="png html"        # space-separated; png and/or html
 # pixel_phenology pipeline options  (only used when PIPELINE="pixel_phenology")
 # ==============================================================================
 # Reads per-pixel datacubes produced by the netcdf_datacube pipeline and writes
-# one CF-1.8 NetCDF per (VI, region) containing 18 phenological metric bands,
+# one CF-1.8 NetCDF per (VI, region) containing 19 phenological metric bands,
 # plus a summary CSV with spatial statistics per metric.
 
-# Input: path(s) to datacube NetCDF files (space-separated for multiple files).
-# Typically produced by running PIPELINE="netcdf_datacube" first.
+# Input: datacube(s) produced by PIPELINE="netcdf_datacube".
+# Accepts either:
+#   A directory — all *_datacube.nc files found recursively within it are used.
+#                 Set to the shapefile subfolder produced by netcdf_datacube, e.g.:
+#                 PIXEL_INPUT_DATACUBES="${OUTPUT_DIR}/LVIS_flightboxes_final"
+#   File path(s) — space-separated list of individual datacube files.
+#                 PIXEL_INPUT_DATACUBES="/path/to/NDVI_G5_1_datacube.nc /path/to/NDVI_G5_12_datacube.nc"
+#
 # PIXEL_INPUT_DATACUBES="/path/to/NDVI_MyRegion_datacube.nc"
 PIXEL_INPUT_DATACUBES=""              # required — set before running pixel_phenology
 
@@ -363,8 +375,25 @@ elif [ "$PIPELINE" = "pixel_phenology" ]; then
         exit 1
     fi
 
+    # Resolve PIXEL_INPUT_DATACUBES: directory → find all *_datacube.nc recursively;
+    # otherwise treat as space-separated file paths (same logic as INPUT_DATACUBES).
+    _PIXEL_DC_FILES=()
+    if [ -d "${PIXEL_INPUT_DATACUBES}" ]; then
+        while IFS= read -r _f; do
+            _PIXEL_DC_FILES+=("$_f")
+        done < <(find "${PIXEL_INPUT_DATACUBES}" -name "*_datacube.nc" | sort)
+        if [ ${#_PIXEL_DC_FILES[@]} -eq 0 ]; then
+            echo "ERROR: No *_datacube.nc files found in: ${PIXEL_INPUT_DATACUBES}" >&2
+            exit 1
+        fi
+        echo "Found ${#_PIXEL_DC_FILES[@]} datacube(s) in ${PIXEL_INPUT_DATACUBES}"
+    else
+        # Space-separated file paths.
+        read -ra _PIXEL_DC_FILES <<< "${PIXEL_INPUT_DATACUBES}"
+    fi
+
     python src/pixel_phenology_extract.py \
-        --input-datacubes  $PIXEL_INPUT_DATACUBES \
+        --input-datacubes  "${_PIXEL_DC_FILES[@]}" \
         --output-dir       "$PIXEL_OUTPUT_DIR" \
         --smooth-lambda    "$PIXEL_SMOOTH_LAMBDA" \
         --min-valid-obs    "$PIXEL_MIN_VALID_OBS" \

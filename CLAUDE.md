@@ -22,7 +22,7 @@ variable in `run_phenology.sh`:
 |---|---|---|
 | `phenology` | `src/vi_phenology.py` | ROI-mean time series, smoothing, metrics, plots |
 | `netcdf_datacube` | `src/netcdf_datacube_extract.py` | Per-pixel CF-1.8 datacubes clipped to polygon regions |
-| `pixel_phenology` | `src/pixel_phenology_extract.py` | 18 per-pixel metric maps from existing datacubes |
+| `pixel_phenology` | `src/pixel_phenology_extract.py` | 19 per-pixel metric maps from existing datacubes |
 
 The `phenology` and `netcdf_datacube` pipelines share the same `--netcdf-dir`, `--vi`,
 `--shapefile`, `--shapefile-field`, `--valid-range-*`, `--workers`, `--start-date`,
@@ -41,6 +41,9 @@ so pointing at the shapefile subfolder picks up all regions automatically.
 The `pixel_phenology` pipeline takes `--input-datacubes` (paths to `*_datacube.nc` files
 produced by `netcdf_datacube`) as its primary input and does not use `--netcdf-dir` or
 shapefiles — the spatial clipping is already embedded in the datacube.
+`--input-datacubes` accepts individual file paths or a **directory path**; when a directory
+is given, all `*_datacube.nc` files found recursively within it are used. `PIXEL_INPUT_DATACUBES`
+in `run_phenology.sh` supports the same two forms.
 
 ## Running the Tool
 
@@ -183,11 +186,11 @@ downstream scientific analysis:
 ### Pixel phenology pipeline (`pixel_phenology_extract.py`)
 
 Reads per-pixel datacubes (from `netcdf_datacube_extract.py`) and produces per-pixel
-phenological metric maps — one CF-1.8 NetCDF per (VI, region) with 18 metric bands:
+phenological metric maps — one CF-1.8 NetCDF per (VI, region) with 19 metric bands:
 - Whittaker smoothing applied per-pixel (λ D^T D penalty matrix precomputed once per
   datacube; all pixels share the same time axis)
-- 18 metrics per pixel: peak NDVI/DOY (mean+std), integrated NDVI (mean+std),
-  green-up rate, floor NDVI, ceiling NDVI, season length (mean+std), CV,
+- 19 metrics per pixel: peak NDVI/DOY (mean+std), integrated NDVI (mean+std),
+  green-up rate (mean+std), floor NDVI, ceiling NDVI, season length (mean+std), CV,
   interannual peak range+std, n_peaks, peak separation, relative peak amplitude,
   valley depth
 - Floor and ceiling NDVI derived directly from the annual smooth curve (no DOY windows)
@@ -350,7 +353,7 @@ dicts; `smoothed` may be `None` when smooth_method is 'none'.
 | `plot.py` | Matplotlib static (PNG) + Plotly interactive (HTML) phenology plots |
 | `io_utils.py` | Shared utilities: observations CSV I/O, NetCDF file discovery, `sanitize_label`, `load_shapefile_regions`, `parse_valid_range`, `read_netcdf_crs`, `setup_log_file` |
 | `netcdf_datacube_extract.py` | Standalone CLI: per-pixel CF-1.8 datacube extraction with two-phase parallel tile processing and CRS-aware merge |
-| `pixel_phenology_extract.py` | Standalone CLI: per-pixel Whittaker smoothing + 18-metric extraction from datacubes; ThreadPoolExecutor over y-row chunks |
+| `pixel_phenology_extract.py` | Standalone CLI: per-pixel Whittaker smoothing + 19-metric extraction from datacubes; ThreadPoolExecutor over y-row chunks |
 
 ## Key Design Decisions
 

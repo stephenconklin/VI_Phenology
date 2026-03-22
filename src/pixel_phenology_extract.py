@@ -5,7 +5,7 @@
 # Per-pixel phenological metric extraction from CF-1.8 datacubes.
 #
 # Reads one or more per-pixel datacubes produced by the netcdf_datacube pipeline
-# and outputs, per (VI, region), a CF-1.8 NetCDF containing 18 phenological
+# and outputs, per (VI, region), a CF-1.8 NetCDF containing 19 phenological
 # metric bands on the same x/y grid as the input, plus a summary CSV with
 # spatial statistics (mean, std, p05, p50, p95, n_valid_pixels) per metric.
 #
@@ -22,16 +22,16 @@
 #    f. Each thread processes its chunk pixel-by-pixel:
 #         - Map observations onto the daily grid (NaN → weight 0).
 #         - Solve (W + λ D^T D) z = W y for the smooth daily series.
-#         - Compute 18 per-year metrics, aggregate mean/std across years.
-#    g. Assemble 18-band output array; write CF-1.8 NetCDF with compression.
+#         - Compute 19 per-year metrics, aggregate mean/std across years.
+#    g. Assemble 19-band output array; write CF-1.8 NetCDF with compression.
 #    h. Write summary CSV.
 #
-# Metric bands (18)
+# Metric bands (19)
 # ─────────────────
 #   peak_ndvi_mean, peak_ndvi_std
 #   peak_doy_mean,  peak_doy_std
 #   integrated_ndvi_mean, integrated_ndvi_std
-#   greenup_rate_mean
+#   greenup_rate_mean, greenup_rate_std
 #   floor_ndvi_mean, ceiling_ndvi_mean          ← derived from curve min/max
 #   season_length_mean, season_length_std
 #   cv                                          ← std/mean of raw obs (whole-series)
@@ -50,6 +50,9 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+
+from tqdm.auto import tqdm
+from tqdm.contrib.logging import logging_redirect_tqdm
 
 import netCDF4 as nc4
 import numpy as np
@@ -78,6 +81,7 @@ METRIC_NAMES = [
     "integrated_ndvi_mean",
     "integrated_ndvi_std",
     "greenup_rate_mean",
+    "greenup_rate_std",
     "floor_ndvi_mean",
     "ceiling_ndvi_mean",
     "season_length_mean",
@@ -322,6 +326,7 @@ def _extract_pixel_metrics(
         "integrated_ndvi_mean":         _safe_mean(annual["integrated"]),
         "integrated_ndvi_std":          _safe_std(annual["integrated"]),
         "greenup_rate_mean":            _safe_mean(annual["greenup"]),
+        "greenup_rate_std":             _safe_std(annual["greenup"]),
         "floor_ndvi_mean":              _safe_mean(annual["floor"]),
         "ceiling_ndvi_mean":            _safe_mean(annual["ceiling"]),
         "season_length_mean":           _safe_mean(annual["season_len"]),
@@ -500,26 +505,23 @@ def process_datacube(
     logger.info("Dispatching %d y-row chunks to %d threads ...", n_chunks, n_workers)
 
     futures = {}
-    with ThreadPoolExecutor(max_workers=n_workers) as executor:
-        for chunk_start in y_chunks:
-            chunk_end = min(chunk_start + _Y_CHUNK_ROWS, n_y)
-            ndvi_chunk = ndvi_np[:, chunk_start:chunk_end, :]
-            future = executor.submit(
-                _process_y_chunk, ndvi_chunk, times, lam_DTD, per_pixel_cfg
-            )
-            futures[future] = (chunk_start, chunk_end)
-
-        completed = 0
-        for future in as_completed(futures):
-            chunk_start, chunk_end = futures[future]
-            result = future.result()
-            out_array[:, chunk_start:chunk_end, :] = result
-            completed += 1
-            if completed % max(1, n_chunks // 10) == 0 or completed == n_chunks:
-                logger.info(
-                    "  %d/%d chunks complete (y-rows %d–%d)",
-                    completed, n_chunks, chunk_start, chunk_end - 1,
+    with logging_redirect_tqdm():
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            for chunk_start in y_chunks:
+                chunk_end = min(chunk_start + _Y_CHUNK_ROWS, n_y)
+                ndvi_chunk = ndvi_np[:, chunk_start:chunk_end, :]
+                future = executor.submit(
+                    _process_y_chunk, ndvi_chunk, times, lam_DTD, per_pixel_cfg
                 )
+                futures[future] = (chunk_start, chunk_end)
+
+            with tqdm(total=n_chunks, desc=f"{vi_name}/{region_label}",
+                      unit="chunk", dynamic_ncols=True) as pbar:
+                for future in as_completed(futures):
+                    chunk_start, chunk_end = futures[future]
+                    result = future.result()
+                    out_array[:, chunk_start:chunk_end, :] = result
+                    pbar.update(1)
 
     # ── Write output NetCDF ───────────────────────────────────────────────────
     region_out_dir = output_dir / region_label

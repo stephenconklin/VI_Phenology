@@ -16,7 +16,7 @@ but accepts any CF-1.8 NetCDF with `time`, `y`, `x` dimensions and a VI data var
 |---|---|---|
 | `phenology` | `src/vi_phenology.py` | ROI-mean time series, smoothing, phenological metrics, and plots |
 | `netcdf_datacube` | `src/netcdf_datacube_extract.py` | Per-pixel CF-1.8 datacubes clipped to polygon regions |
-| `pixel_phenology` | `src/pixel_phenology_extract.py` | 18 per-pixel phenological metric maps from existing datacubes |
+| `pixel_phenology` | `src/pixel_phenology_extract.py` | 19 per-pixel phenological metric maps from existing datacubes |
 
 The `phenology` and `netcdf_datacube` pipelines support multi-tile inputs, parallel
 processing (`--workers`), date range filtering, and per-region shapefile splitting.
@@ -50,12 +50,12 @@ Clips source tiles to polygon boundaries and delivers per-pixel CF-1.8 datacubes
 Reads per-pixel datacubes (output of the `netcdf_datacube` pipeline) and produces
 per-pixel phenological metric maps:
 - Whittaker smoothing applied per pixel — handles HLS's irregular revisit cadence natively, no binning required
-- 18 metric bands output as a CF-1.8 NetCDF on the same x/y grid as the input datacube:
+- 19 metric bands output as a CF-1.8 NetCDF on the same x/y grid as the input datacube:
 
   | Metric group | Bands |
   |---|---|
   | Peak | `peak_ndvi_mean`, `peak_ndvi_std`, `peak_doy_mean`, `peak_doy_std` |
-  | Productivity | `integrated_ndvi_mean`, `integrated_ndvi_std`, `greenup_rate_mean` |
+  | Productivity | `integrated_ndvi_mean`, `integrated_ndvi_std`, `greenup_rate_mean`, `greenup_rate_std` |
   | Seasonality | `floor_ndvi_mean`, `ceiling_ndvi_mean`, `season_length_mean`, `season_length_std` |
   | Variability | `cv`, `interannual_peak_range`, `interannual_peak_std` |
   | Bimodality | `n_peaks_mean`, `peak_separation_mean`, `relative_peak_amplitude_mean`, `valley_depth_mean` |

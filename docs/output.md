@@ -156,7 +156,7 @@ VI and `region_label` are parsed from the input datacube filename:
 
 | File | Description |
 |------|-------------|
-| `{VI}_{region_label}_pixel_metrics.nc` | CF-1.8 NetCDF with 18 metric bands (one per phenological metric), zlib compressed (complevel=4). One file per (VI, region_label). |
+| `{VI}_{region_label}_pixel_metrics.nc` | CF-1.8 NetCDF with 19 metric bands (one per phenological metric), zlib compressed (complevel=4). One file per (VI, region_label). |
 | `{VI}_{region_label}_pixel_metrics_summary.csv` | Spatial statistics per metric: mean, std, p05, p50, p95, n_valid_pixels |
 | `pixel_phenology_{timestamp}.log` | Timestamped log file written to `--output-dir` root |
 

@@ -19,7 +19,7 @@ but accepts any CF-1.8 NetCDF with `time`, `y`, `x` dimensions and a VI data var
 |---|---|---|
 | **phenology** | ROI-mean time series, smoothing, phenological metrics, plots | `PIPELINE="phenology"` (default) |
 | **netcdf_datacube** | Per-pixel CF-1.8 datacubes clipped to polygon regions | `PIPELINE="netcdf_datacube"` |
-| **pixel_phenology** | 18 per-pixel metric maps from existing datacubes | `PIPELINE="pixel_phenology"` |
+| **pixel_phenology** | 19 per-pixel metric maps from existing datacubes | `PIPELINE="pixel_phenology"` |
 
 The `phenology` and `netcdf_datacube` pipelines share the same input configuration:
 `NETCDF_DIR`, `VI`, `SHAPEFILE`, `SHAPEFILE_FIELD`, `VALID_RANGE_*`, `WORKERS`,
