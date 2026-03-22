@@ -88,7 +88,7 @@ python src/vi_phenology.py \
 The number of `--shapefile-field` values must match the number of `--shapefile` paths exactly.
 A mismatch is a hard error.
 
-In `run_phenology.sh`, set `SHAPEFILE_FIELD` to activate field splitting:
+In `config.local.env`, set `SHAPEFILE_FIELD` to activate field splitting:
 
 ```bash
 SHAPEFILE="flights.shp tiles.geojson"
@@ -129,7 +129,7 @@ The datacube pipeline preserves the full spatial dimension and merges tiles base
 their CRS relationships: same-UTM-zone tiles are mosaiced without resampling; tiles
 spanning a UTM zone boundary are bilinearly reprojected to the dominant CRS before
 merging. Merge behavior is controlled by `MERGE_SAME_CRS` and `MERGE_CROSS_CRS` in
-`run_phenology.sh`.
+`config.local.env`.
 
 For the full merge algorithm, CRS detection logic, and merge options, see
 [netCDF Datacube Pipeline — Multi-Tile and Multi-CRS Handling](datacube.md#multi-tile-and-multi-crs-handling).

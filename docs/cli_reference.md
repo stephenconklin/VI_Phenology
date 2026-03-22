@@ -7,8 +7,9 @@ This page covers the **phenology pipeline** CLI (`src/vi_phenology.py`).
 | netCDF datacube pipeline | [netCDF Datacube Pipeline → CLI Reference](datacube.md#cli-reference) |
 | Pixel phenology pipeline | [Pixel Phenology Pipeline → CLI Reference](pixel_phenology.md#cli-reference) |
 
-The recommended way to run either pipeline is via `run_phenology.sh` — edit its variables
-and run `./run_phenology.sh`. All parameters are documented with inline comments inside the script.
+The recommended way to run any pipeline is via `run_phenology.sh` — set variables in
+`config.local.env` and run `./run_phenology.sh`. All variables are documented with inline
+comments in `config.env`. See [Overview — Setup](overview.md#setup) for the config file model.
 
 ---
 
@@ -97,7 +98,7 @@ Randomly samples a fixed set of N pixels per region — used consistently across
 
 All output types are enabled by default. Use these flags to disable specific outputs:
 
-| Argument | `run_phenology.sh` variable | Controls |
+| Argument | `config.local.env` variable | Controls |
 |----------|------|---------|
 | `--no-observations-csv` | `SAVE_OBSERVATIONS_CSV=false` | Per-region observations-only CSV files |
 | `--no-combined-outputs` | `SAVE_COMBINED_OUTPUTS=false` | Combined shapefile observations CSV |

@@ -213,49 +213,69 @@ def _write_overview_figure(
     fig = plt.figure(figsize=(FIG_W, FIG_H), dpi=dpi)
     fig.patch.set_facecolor("#f7f7f7")
 
-    # Outer gridspec: left sidebar + main panel area.
-    # left=0.09 keeps y-axis tick labels from bleeding over the sidebar.
-    outer = gridspec.GridSpec(
-        1, 2, figure=fig,
-        width_ratios=[0.028, 0.972],
-        left=0.09, right=0.97,
-        top=0.97, bottom=0.01,
-        wspace=0.01,
-    )
-    gs = gridspec.GridSpecFromSubplotSpec(
+    # ── Page header (computed before gridspec so top= is set correctly) ───
+    # Work in absolute inches so gaps don't collapse on tall figures (large FIG_H).
+    # Gap2 must clear the panel title overhead: title fontsize (7.5pt) + pad (4pt).
+    TITLE_PT   = 14
+    SUB_PT     = 7
+    _h = lambda pt: pt / 72.0   # points → inches (absolute, FIG_H-independent)
+    _margin_in = _h(4)          # top margin above title
+    _gap1_in   = _h(5)          # gap: title bottom → subtitle top
+    _gap2_in   = _h(20)         # gap: subtitle bottom → panel area top
+                                # (must exceed panel title overhead ≈ 11.5 pt)
+    _header_in = _margin_in + _h(TITLE_PT) + _gap1_in + _h(SUB_PT) + _gap2_in
+    _title_y   = 1.0 - _margin_in / FIG_H
+    _sub_y     = 1.0 - (_margin_in + _h(TITLE_PT) + _gap1_in) / FIG_H
+    _top       = 1.0 - _header_in / FIG_H
+
+    # Panel GridSpec — starts at left=0.09 so y-tick labels sit in [~0.07, 0.09],
+    # completely clear of the sidebar which occupies [0.01, 0.06].
+    gs = gridspec.GridSpec(
         N_ROWS, N_COLS,
-        subplot_spec=outer[1],
+        left=0.09, right=0.97,
+        top=_top, bottom=0.01,
         hspace=0.38, wspace=0.35,
     )
 
-    # ── Page header ───────────────────────────────────────────────────────
     aspect_note = (
         f"Display aspect {display_ar:.1f}:1  |  "
         f"True geographic aspect {geo_ar:.1f}:1"
         if geo_ar > MAX_PANEL_AR else
         f"Geographic aspect {geo_ar:.1f}:1 (no compression)"
     )
-    fig.text(0.50, 0.988, f"{vi_name} Pixel Phenology — Region: {region_label}",
-             ha="center", va="top", fontsize=18, fontweight="bold", color="#1a1a1a")
-    fig.text(0.50, 0.982,
+    fig.text(0.50, _title_y, f"{vi_name} Pixel Phenology — Region: {region_label}",
+             ha="center", va="top", fontsize=TITLE_PT, fontweight="bold", color="#1a1a1a")
+    fig.text(0.50, _sub_y,
              f"Whittaker λ={config['smooth_lambda']:.0f}  |  "
              f"min obs={config['min_valid_obs']}  |  "
              f"season threshold={config['season_threshold']:.2f}  |  "
              f"peak prominence={config['peak_prominence']:.2f}  |  "
              f"{aspect_note}  |  "
              f"Generated {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}",
-             ha="center", va="top", fontsize=7, color="#555555")
+             ha="center", va="top", fontsize=SUB_PT, color="#555555")
 
-    # ── Group sidebar ─────────────────────────────────────────────────────
-    sidebar_ax = fig.add_subplot(outer[0])
+    # ── Group sidebar — placed in the true left margin via add_axes ────────
+    # Using add_axes (not GridSpec) keeps it fully outside the panel region,
+    # so y-axis tick labels on the leftmost column are never obscured by it.
+    sidebar_ax = fig.add_axes([0.01, 0.01, 0.05, _top - 0.01])
     sidebar_ax.set_xlim(0, 1)
     sidebar_ax.set_ylim(0, N_ROWS)
     sidebar_ax.axis("off")
 
-    group_rows = {}
+    # Count metrics per (row, group); assign each row to its dominant group.
+    # This prevents sidebar box overlap when two groups share a row (e.g.
+    # Variability cols 0–2 and Bimodality col 3 in the same row).
+    _row_group_counts: dict = {}
     for slot, name in enumerate(METRIC_NAMES):
         g = METRIC_META[name][3]
-        group_rows.setdefault(g, []).append(slot // N_COLS)
+        row = slot // N_COLS
+        _row_group_counts.setdefault(row, {})
+        _row_group_counts[row][g] = _row_group_counts[row].get(g, 0) + 1
+
+    group_rows: dict = {}
+    for row, counts in _row_group_counts.items():
+        dominant = max(counts, key=counts.get)
+        group_rows.setdefault(dominant, []).append(row)
 
     for g in _GROUP_ORDER:
         if g not in group_rows:

@@ -12,19 +12,34 @@ but accepts any CF-1.8 NetCDF with `time`, `y`, `x` dimensions and a VI data var
 
 ---
 
-## Three Pipelines
+## Four Pipelines
 
 | Pipeline | Script | Purpose |
 |---|---|---|
 | `netcdf_datacube` | `src/netcdf_datacube_extract.py` | **Foundation** — clip source tiles to polygon regions; produce per-pixel CF-1.8 datacubes for downstream use |
 | `phenology` | `src/vi_phenology.py` | ROI-mean time series, smoothing, phenological metrics, and plots — reads datacubes or raw tiles |
 | `pixel_phenology` | `src/pixel_phenology_extract.py` | 19 per-pixel phenological metric maps — reads datacubes produced by `netcdf_datacube` |
+| `datacube_to_geotiff` | `src/datacube_to_geotiff.py` | Per-year / per-month / per-DOY summary statistics as multi-band GeoTiffs — reads datacubes produced by `netcdf_datacube` |
 
 Start with `netcdf_datacube`. It clips source tiles to your polygon boundaries once and
 produces the per-pixel datacubes that power all downstream analysis. From those datacubes,
 run `phenology` for ROI-mean time series and plots, `pixel_phenology` for spatially
-explicit metric maps, or both. Select the pipeline via the `PIPELINE` variable in
-`run_phenology.sh`, or invoke each script directly from the CLI.
+explicit metric maps, `datacube_to_geotiff` for model-ready raster statistics, or any
+combination. Select the pipeline by setting `PIPELINE` in `config.local.env`
+and running `./run_phenology.sh`, or invoke each script directly from the CLI.
+
+---
+
+## Quickstart
+
+```bash
+cp config.env config.local.env   # then edit config.local.env with your paths and PIPELINE
+./run_phenology.sh
+```
+
+`config.env` is the documented base template (committed to git). `config.local.env` holds your
+project-specific overrides and is gitignored. Full setup details are in the
+[documentation](https://vi-phenology.readthedocs.io/en/latest/overview.html#setup).
 
 ---
 
@@ -65,6 +80,17 @@ Step 2: PIPELINE="pixel_phenology"
 ```
   PIPELINE="netcdf_datacube"
   Clips source tiles → *_datacube.nc files ready for your own downstream tools
+```
+
+### Workflow D — Model-ready raster statistics
+
+```
+Step 1 (required): PIPELINE="netcdf_datacube"
+  Clips source tiles → *_datacube.nc files
+
+Step 2: PIPELINE="datacube_to_geotiff"
+  Reads those datacubes → per-year / per-month / per-DOY summary GeoTiffs
+  Three multi-band GeoTiffs per region: *_per_year.tif, *_per_month.tif, *_per_doy.tif
 ```
 
 ---
@@ -110,6 +136,18 @@ per-pixel phenological metric maps:
 - Floor and ceiling NDVI derived from the curve itself — no biome-specific DOY window configuration needed
 - Summary CSV with spatial statistics (mean, std, p05, p50, p95) per metric
 - Parallelised via `ThreadPoolExecutor`; scipy sparse solver releases GIL for true multi-core throughput
+
+### datacube_to_geotiff pipeline (`datacube_to_geotiff.py`)
+
+Reads per-pixel datacubes (output of the `netcdf_datacube` pipeline) and writes three
+multi-band GeoTiffs per (VI, region) for delivery to downstream models:
+- **`*_per_year.tif`** — N_years × 3 bands: median, p05, p95 per calendar year
+- **`*_per_month.tif`** — 36 bands (12 months × 3 statistics); per-year percentiles computed first, then averaged across years
+- **`*_per_doy.tif`** — 1095 bands (365 DOYs × 3 statistics); raw observations pooled across all years at each DOY
+- LZW-compressed, 256×256 tiled GeoTiff; BigTIFF when > 4 GB; NoData = CF float32 fill value
+- Band descriptions accessible via `gdalinfo -mdd all` or `rasterio.open().descriptions`
+- Streaming band-by-band write — peak memory is one spatial band regardless of output size
+- Use `--skip-per-doy` for large regions where the 1095-band product is impractical
 
 ---
 

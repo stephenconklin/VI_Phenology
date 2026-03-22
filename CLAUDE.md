@@ -13,16 +13,17 @@ conda env create -f environment.yml
 conda activate vi_phenology
 ```
 
-## Three Pipelines — Overview
+## Four Pipelines — Overview
 
-This repository contains three independent processing pipelines, selected via the `PIPELINE`
-variable in `run_phenology.sh`:
+This repository contains four independent processing pipelines, selected via the `PIPELINE`
+variable in `config.local.env`:
 
 | `PIPELINE` | Script | Purpose |
 |---|---|---|
 | `phenology` | `src/vi_phenology.py` | ROI-mean time series, smoothing, metrics, plots |
 | `netcdf_datacube` | `src/netcdf_datacube_extract.py` | Per-pixel CF-1.8 datacubes clipped to polygon regions |
 | `pixel_phenology` | `src/pixel_phenology_extract.py` | 19 per-pixel metric maps from existing datacubes |
+| `datacube_to_geotiff` | `src/datacube_to_geotiff.py` | Per-year/month/DOY statistics as multi-band GeoTiffs |
 
 The `phenology` and `netcdf_datacube` pipelines share the same `--netcdf-dir`, `--vi`,
 `--shapefile`, `--shapefile-field`, `--valid-range-*`, `--workers`, `--start-date`,
@@ -37,19 +38,35 @@ thresholds, or plots) after the `netcdf_datacube` pipeline has already produced 
 is given, all `*_datacube.nc` files found recursively within it are used. This matches the
 nested output layout of `netcdf_datacube` (`{output_dir}/{shapefile_stem}/{region_label}/`)
 so pointing at the shapefile subfolder picks up all regions automatically.
+Set via `PHENOLOGY_INPUT_DATACUBES` in `config.local.env`.
 
 The `pixel_phenology` pipeline takes `--input-datacubes` (paths to `*_datacube.nc` files
 produced by `netcdf_datacube`) as its primary input and does not use `--netcdf-dir` or
 shapefiles — the spatial clipping is already embedded in the datacube.
 `--input-datacubes` accepts individual file paths or a **directory path**; when a directory
-is given, all `*_datacube.nc` files found recursively within it are used. `PIXEL_INPUT_DATACUBES`
-in `run_phenology.sh` supports the same two forms.
+is given, all `*_datacube.nc` files found recursively within it are used. Set via
+`PIXEL_INPUT_DATACUBES` in `config.local.env`.
 
 ## Running the Tool
 
-### Recommended — `run_phenology.sh`
+### Recommended — `run_phenology.sh` + `config.local.env`
 
-Edit the variables at the top and run `./run_phenology.sh`. Inline comments document every option.
+Configuration is split from the execution engine:
+
+| File | Purpose | Committed? |
+|---|---|---|
+| `config.env` | All variables with defaults and inline documentation | Yes |
+| `config.local.env` | Project-specific overrides (actual paths and active pipeline) | No (gitignored) |
+| `run_phenology.sh` | Execution engine — sources both config files, then dispatches the selected pipeline | Yes |
+
+**Setup:** Copy `config.env` to `config.local.env` and set your paths and active pipeline.
+**Run:** `./run_phenology.sh`
+
+`config.local.env` only needs to contain the variables you are overriding. Any variable not set
+there falls back to the value in `config.env`. All variables are documented with inline comments
+in `config.env`. To maintain multiple project configurations, keep named copies (e.g.
+`config.local.BioSCape.env`, `config.local.Durango.env`) and symlink or copy the active one to
+`config.local.env` before running.
 
 ### Phenology pipeline (direct CLI)
 
@@ -153,13 +170,31 @@ python src/pixel_phenology_extract.py \
 
 Use `python src/pixel_phenology_extract.py --help` for the full argument reference.
 
+### datacube_to_geotiff pipeline (direct CLI)
+
+Reads `*_datacube.nc` files produced by `netcdf_datacube_extract.py` and writes three
+multi-band GeoTiffs per (VI, region). VI and region label are inferred from the filename.
+
+```bash
+python src/datacube_to_geotiff.py \
+  --input-datacubes /path/to/NDVI_MyRegion_datacube.nc \
+  --output-dir ./geotiff_stats \
+  --valid-range-ndvi "-0.1,1.0" \
+  --workers 4 \
+  --start-date 2020-01-01 \
+  --end-date   2024-12-31
+```
+
+Use `python src/datacube_to_geotiff.py --help` for the full argument reference.
+
 ## Implementation Status
 
 All modules are **fully implemented**. The end-to-end pipeline runs successfully across
 all layers (extraction → smoothing → metrics → plots). No stubs remain.
 
-`netcdf_datacube_extract.py` and `pixel_phenology_extract.py` are standalone modules —
-neither depends on `PhenologyConfig` or any other phenology-pipeline module.
+`netcdf_datacube_extract.py`, `pixel_phenology_extract.py`, and `datacube_to_geotiff.py`
+are standalone modules — none depends on `PhenologyConfig` or any other phenology-pipeline
+module.
 
 ## Project Purpose
 
@@ -198,6 +233,23 @@ phenological metric maps — one CF-1.8 NetCDF per (VI, region) with 19 metric b
   GIL for true multi-core throughput
 - Outputs: `{VI}_{region_label}_pixel_metrics.nc` (compressed, CF-1.8) +
   `{VI}_{region_label}_pixel_metrics_summary.csv` (spatial stats per metric)
+
+### datacube_to_geotiff pipeline (`datacube_to_geotiff.py`)
+
+Reads per-pixel datacubes (from `netcdf_datacube_extract.py`) and produces three
+multi-band GeoTiffs per (VI, region) for delivery to downstream models:
+- **`*_per_year.tif`** — N_years × 3 bands; for each calendar year: median, p05, p95
+  of all valid observations in that year
+- **`*_per_month.tif`** — 36 bands (12 months × 3 stats); "per-year then average years"
+  method: per-year percentiles computed first, then averaged across years
+- **`*_per_doy.tif`** — 1095 bands (365 DOYs × 3 stats); raw observations pooled across
+  all years at each DOY; ~80% of bands are all-NoData at HLS ~5-day cadence
+- NoData value: `9.96920996838687e+36` (CF/NetCDF4 float32 fill value, `NC_FILL_FLOAT`)
+- GeoTiff format: LZW compressed, 256×256 tiled, BigTIFF when >4 GB, band descriptions
+  set via GDAL standard field (`dst.set_band_description(i, name)`)
+- Written one band at a time (streaming) — no large output array in RAM
+- Parallelised via `ThreadPoolExecutor` over datacubes; `--skip-per-doy` available for
+  large regions where the 1095-band product would be impractical
 
 ## Architecture: Phenology Layered Output Design
 
@@ -309,9 +361,9 @@ and `config.compute_metrics` (for the metrics CSV).
 ### Output Toggles (phenology pipeline only)
 
 All output types are enabled by default. Disable individually via CLI flags or
-`run_phenology.sh` variables:
+`config.local.env` variables:
 
-| Config field | CLI flag | `run_phenology.sh` | Controls |
+| Config field | CLI flag | config variable | Controls |
 |---|---|---|---|
 | `save_observations_csv` | `--no-observations-csv` | `SAVE_OBSERVATIONS_CSV=false` | Per-region observations CSV |
 | `save_combined_outputs` | `--no-combined-outputs` | `SAVE_COMBINED_OUTPUTS=false` | Combined shapefile observations CSV |
@@ -354,6 +406,7 @@ dicts; `smoothed` may be `None` when smooth_method is 'none'.
 | `io_utils.py` | Shared utilities: observations CSV I/O, NetCDF file discovery, `sanitize_label`, `load_shapefile_regions`, `parse_valid_range`, `read_netcdf_crs`, `setup_log_file` |
 | `netcdf_datacube_extract.py` | Standalone CLI: per-pixel CF-1.8 datacube extraction with two-phase parallel tile processing and CRS-aware merge |
 | `pixel_phenology_extract.py` | Standalone CLI: per-pixel Whittaker smoothing + 19-metric extraction from datacubes; ThreadPoolExecutor over y-row chunks |
+| `datacube_to_geotiff.py` | Standalone CLI: per-year/month/DOY statistics from datacubes as multi-band GeoTiffs; streaming band-by-band write; ThreadPoolExecutor over datacubes |
 
 ## Key Design Decisions
 
@@ -443,7 +496,7 @@ by `compute_metrics()` regardless. Dissolved shapefiles (field value `'none'`) a
 
 Two complementary thresholds gate metric computation at different granularities:
 
-| Parameter | CLI flag | `run_phenology.sh` | Applied in | Effect |
+| Parameter | CLI flag | config variable | Applied in | Effect |
 |---|---|---|---|---|
 | `min_valid_obs` | `--min-valid-obs` | `MIN_VALID_OBS` / `PIXEL_MIN_VALID_OBS` | Phenology: `vi_phenology.py` main loop; Pixel: `_extract_pixel_metrics` | Skip region/pixel entirely if total obs < N |
 | `min_valid_obs_per_year` | `--min-valid-obs-per-year` | `MIN_VALID_OBS_PER_YEAR` / `PIXEL_MIN_VALID_OBS_PER_YEAR` | Phenology: `metrics.py compute_metrics()`; Pixel: `_extract_pixel_metrics` per-year loop | Skip individual annual window if obs < N; no NaN row written |
@@ -483,7 +536,7 @@ Phase B  (extraction — always runs)
 
 **Parameters (phenology pipeline only):**
 
-| CLI flag | `run_phenology.sh` | Default | Effect |
+| CLI flag | config variable | Default | Effect |
 |---|---|---|---|
 | `--sample-pixels N` | `SAMPLE_PIXELS` (commented out) | None = all pixels | Number of pixels to randomly sample per region |
 | `--random-seed SEED` | `RANDOM_SEED` (commented out) | None = random | RNG seed for reproducible pixel samples |
@@ -703,7 +756,21 @@ One file per tile+VI: `T{TILE}_{VI}.nc` (HLS_VI_Pipeline naming convention)
 
 Overview outputs are generated by default. Disable individually via `--no-overview-figure`
 and `--no-overview-html` CLI flags, or `PIXEL_OVERVIEW_FIGURE=false` /
-`PIXEL_OVERVIEW_HTML=false` in `run_phenology.sh`.
+`PIXEL_OVERVIEW_HTML=false` in `config.local.env`.
+
+### datacube_to_geotiff pipeline
+
+| Output | Pattern | Location |
+|--------|---------|----------|
+| Per-year GeoTiff | `{VI}_{region_label}_per_year.tif` | `{output_dir}/{region_label}/` |
+| Per-month GeoTiff | `{VI}_{region_label}_per_month.tif` | `{output_dir}/{region_label}/` |
+| Per-DOY GeoTiff | `{VI}_{region_label}_per_doy.tif` | `{output_dir}/{region_label}/` |
+| Log file | `datacube_to_geotiff_{YYYYMMDD_HHMMSS}.log` | `--output-dir` root |
+
+Band count: per-year = N_years × 3; per-month = 36; per-DOY = 1095.
+Band descriptions accessible via `gdalinfo -mdd all` or `rasterio.open().descriptions`.
+Suppress individual products with `--skip-per-year`, `--skip-per-month`, `--skip-per-doy`
+(or `GEOTIFF_PER_YEAR=false` etc. in `config.local.env`).
 
 The PNG is a print-quality 4×5 panel sheet with geographic aspect ratio preserved.
 The HTML is an interactive Plotly viewer (2-column × 10-row) with hover-enabled pixel

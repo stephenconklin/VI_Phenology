@@ -22,15 +22,16 @@ smoothed curves, phenological metrics, or plots.
 
 ## Selecting the Pipeline
 
-In `run_phenology.sh`, set the `PIPELINE` variable at the top of the file:
+Set `PIPELINE` in `config.local.env`:
 
 ```bash
 PIPELINE="netcdf_datacube"   # CF-1.8 datacubes (this pipeline)
-PIPELINE="phenology"         # ROI-mean time series, metrics, plots (default)
+PIPELINE="phenology"         # ROI-mean time series, metrics, plots
 ```
 
 All input variables (`NETCDF_DIR`, `VI`, `SHAPEFILE`, `SHAPEFILE_FIELD`,
-`VALID_RANGE_*`, `WORKERS`, `START_DATE`, `END_DATE`) are shared between both pipelines.
+`VALID_RANGE_*`, `WORKERS`, `START_DATE`, `END_DATE`) are shared between both pipelines
+and are set in `config.local.env` (see [Overview — Setup](overview.md#setup)).
 
 ---
 
@@ -115,7 +116,7 @@ resampling_method: bilinear
 
 ### Merge Options
 
-| `run_phenology.sh` variable | CLI flag | Default | Effect |
+| `config.local.env` variable | CLI flag | Default | Effect |
 |---|---|---|---|
 | `MERGE_SAME_CRS=true` | *(default)* | on | Merge same-CRS tiles into one datacube per region |
 | `MERGE_SAME_CRS=false` | `--no-merge-same-crs` | — | One file per tile, native CRS |
@@ -261,8 +262,8 @@ metric maps from these datacubes. Point `PIXEL_INPUT_DATACUBES` at the output di
 (e.g. `${OUTPUT_DIR}/LVIS_flightboxes_final`) to pick up all regions automatically.
 
 **[Phenology Pipeline — Datacube Input Mode](cli_reference.md#input)** — run the phenology
-pipeline without re-running tile discovery or clipping. Set `INPUT_DATACUBES` in
-`run_phenology.sh` to the same directory. Faster for iterating on smoothing settings,
+pipeline without re-running tile discovery or clipping. Set `PHENOLOGY_INPUT_DATACUBES` in
+`config.local.env` to the same directory. Faster for iterating on smoothing settings,
 thresholds, or plot styles.
 
 ---
