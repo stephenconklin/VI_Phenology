@@ -16,7 +16,7 @@ PIPELINE="pixel_phenology"
 # ==============================================================================
 
 # ── Output ─────────────────────────────────────────────────────────────────────
-OUTPUT_DIR="/Volumes/ConklinGeospatialData/Data/Durango_HLS_VI/VI_Phenology/pixel_phenology_whittaker_100"
+OUTPUT_DIR="/Volumes/ConklinGeospatialData/Data/Durango_HLS_VI/VI_Phenology"
 
 # ── Valid ranges (min,max) ─────────────────────────────────────────────────────
 VALID_RANGE_NDVI="-1,1"
@@ -181,7 +181,7 @@ PLOT_FORMAT="png html"        # space-separated; png and/or html
 #                 PIXEL_INPUT_DATACUBES="/path/to/NDVI_G5_1_datacube.nc /path/to/NDVI_G5_12_datacube.nc"
 #
 # PIXEL_INPUT_DATACUBES="/path/to/NDVI_MyRegion_datacube.nc"
-PIXEL_INPUT_DATACUBES=""              # required — set before running pixel_phenology
+PIXEL_INPUT_DATACUBES="/Volumes/ConklinGeospatialData/Data/BioSCape_SA_LVIS/VI_Phenology/netcdf_datacube"              # required — set before running pixel_phenology
 
 # Output directory for pixel metric files (created if it does not exist).
 # PIXEL_OUTPUT_DIR="${OUTPUT_DIR}/pixel_metrics"

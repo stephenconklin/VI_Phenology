@@ -14,14 +14,15 @@ but accepts any CF-1.8 NetCDF with `time`, `y`, `x` dimensions and a VI data var
 
 | Pipeline | Script | Purpose |
 |---|---|---|
-| `phenology` | `src/vi_phenology.py` | ROI-mean time series, smoothing, phenological metrics, and plots |
-| `netcdf_datacube` | `src/netcdf_datacube_extract.py` | Per-pixel CF-1.8 datacubes clipped to polygon regions |
-| `pixel_phenology` | `src/pixel_phenology_extract.py` | 19 per-pixel phenological metric maps from existing datacubes |
+| `netcdf_datacube` | `src/netcdf_datacube_extract.py` | **Foundation** — clip source tiles to polygon regions; produce per-pixel CF-1.8 datacubes for downstream use |
+| `phenology` | `src/vi_phenology.py` | ROI-mean time series, smoothing, phenological metrics, and plots — reads datacubes or raw tiles |
+| `pixel_phenology` | `src/pixel_phenology_extract.py` | 19 per-pixel phenological metric maps — reads datacubes produced by `netcdf_datacube` |
 
-The `phenology` and `netcdf_datacube` pipelines support multi-tile inputs, parallel
-processing (`--workers`), date range filtering, and per-region shapefile splitting.
-Select the pipeline via the `PIPELINE` variable in `run_phenology.sh`, or invoke each
-script directly from the CLI.
+Start with `netcdf_datacube`. It clips source tiles to your polygon boundaries once and
+produces the per-pixel datacubes that power all downstream analysis. From those datacubes,
+run `phenology` for ROI-mean time series and plots, `pixel_phenology` for spatially
+explicit metric maps, or both. Select the pipeline via the `PIPELINE` variable in
+`run_phenology.sh`, or invoke each script directly from the CLI.
 
 ---
 
@@ -66,6 +67,16 @@ Step 2: PIPELINE="pixel_phenology"
 
 ---
 
+### netCDF datacube pipeline (`netcdf_datacube_extract.py`)
+
+Clips source tiles to polygon boundaries and delivers per-pixel CF-1.8 datacubes (time × y × x):
+- Retains the full time axis across all tile acquisition dates — each pixel carries a complete VI time series
+- Preserves full spatial resolution for downstream per-pixel analysis (trend, anomaly, classification, etc.)
+- Same-CRS tiles mosaiced via a memory-bounded write loop (no resampling)
+- Cross-CRS tiles bilinearly reprojected to the dominant CRS before merging
+- CF-1.8 global attributes written to all output files
+- Output feeds both `phenology` (datacube input mode) and `pixel_phenology` directly
+
 ### Phenology pipeline (`vi_phenology.py`)
 
 Extracts spatially aggregated ROI-mean time series and produces:
@@ -78,15 +89,6 @@ Extracts spatially aggregated ROI-mean time series and produces:
 - **Pixel filtering** (`--min-ndvi-mean`, `--min-quality-frac`): exclude bare soil / persistently cloud-covered pixels before sampling
 - **Observation thresholds** (`--min-valid-obs`, `--min-valid-obs-per-year`): skip data-poor regions or individual sparse years rather than fitting unreliable phenological metrics
 - **Datacube input mode** (`--input-datacubes`): read pre-clipped datacubes produced by the `netcdf_datacube` pipeline instead of re-clipping source tiles — eliminates tile discovery and parallel clip overhead for repeated runs with different smoothing settings, thresholds, or plot styles; accepts a directory path (all `*_datacube.nc` files found recursively) or individual file paths
-
-### netCDF datacube pipeline (`netcdf_datacube_extract.py`)
-
-Clips source tiles to polygon boundaries and delivers per-pixel CF-1.8 datacubes (time × y × x):
-- Retains the full time axis across all tile acquisition dates — each pixel carries a complete VI time series
-- Preserves full spatial resolution for downstream per-pixel analysis (trend, anomaly, classification, etc.)
-- Same-CRS tiles mosaiced via a memory-bounded write loop (no resampling)
-- Cross-CRS tiles bilinearly reprojected to the dominant CRS before merging
-- CF-1.8 global attributes written to all output files
 
 ### Pixel phenology pipeline (`pixel_phenology_extract.py`)
 
