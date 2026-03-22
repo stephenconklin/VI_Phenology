@@ -29,6 +29,65 @@ and does not use `--netcdf-dir` or shapefiles.
 
 ---
 
+## Typical Workflows
+
+### Workflow A — ROI-mean phenology (most common)
+
+Spatially aggregate pixels within a polygon, smooth the time series, compute
+phenological metrics, and generate plots.
+
+```
+Step 1 (optional but recommended)
+  PIPELINE="netcdf_datacube"   → clips tiles to your polygon → *_datacube.nc files
+
+Step 2
+  PIPELINE="phenology"         → reads datacubes via --input-datacubes
+                                 (skips tile discovery and clipping on re-runs)
+```
+
+Or in a single pass without producing datacubes first:
+
+```
+  PIPELINE="phenology"         → discovers tiles, clips, aggregates, smooths, plots
+  (uses --netcdf-dir + --shapefile directly)
+```
+
+Producing datacubes first pays off when you need to re-run the phenology pipeline
+with different smoothing settings, thresholds, or plot styles — tile clipping is
+the slow step, and datacubes let you skip it entirely on subsequent runs.
+
+---
+
+### Workflow B — Per-pixel phenological metric maps
+
+Compute 19 spatially explicit phenological metrics (one value per 30-m pixel) across
+your region of interest.
+
+```
+Step 1 (required)
+  PIPELINE="netcdf_datacube"   → clips tiles to your polygon → *_datacube.nc files
+
+Step 2
+  PIPELINE="pixel_phenology"   → reads those datacubes → 19-band metric NetCDF per region
+```
+
+> **Note:** `pixel_phenology` requires datacubes from `netcdf_datacube` as its input.
+> There is no direct path from raw NetCDF tiles to pixel metric maps — the datacube
+> step is mandatory.
+
+---
+
+### Workflow C — Per-pixel datacubes only
+
+Extract clipped per-pixel VI time series for use in external models or custom analysis,
+without computing phenological metrics.
+
+```
+  PIPELINE="netcdf_datacube"   → *_datacube.nc files ready for downstream use
+```
+
+---
+
 ## Supported Vegetation Indices
 
 | VI | Name |
@@ -124,26 +183,42 @@ All parameters are documented with inline comments inside the script.
 
 ### Direct CLI — Phenology Pipeline
 
+**Standard mode** — discovers and clips source tiles on each run:
+
 ```bash
 python src/vi_phenology.py \
   --netcdf-dir /path/to/netcdfs \
   --vi NDVI EVI2 \
   --shapefile /path/to/roi.gpkg \
+  --shapefile-field Name \
   --output-dir ./outputs \
-  --smooth-method savgol \
-  --smooth-window 15 \
-  --smooth-polyorder 3 \
+  --smooth-method whittaker \
+  --smooth-lambda 100 \
   --plot-style combined \
   --plot-format png html \
   --metrics \
   --workers 8
 ```
 
+**Datacube input mode** — reads pre-clipped datacubes, skips tile discovery (faster for re-runs):
+
+```bash
+python src/vi_phenology.py \
+  --input-datacubes /path/to/outputs/my_shapefile_stem \
+  --vi NDVI \
+  --output-dir ./outputs \
+  --smooth-method whittaker \
+  --smooth-lambda 100 \
+  --plot-style combined \
+  --plot-format png html \
+  --metrics
+```
+
 ```bash
 python src/vi_phenology.py --help
 ```
 
-For the full argument reference, see the [CLI Reference](cli_reference.md).
+For the full argument reference, see the [Phenology Pipeline CLI Reference](cli_reference.md).
 
 ### Direct CLI — netCDF Datacube Pipeline
 

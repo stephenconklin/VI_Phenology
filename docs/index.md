@@ -5,10 +5,10 @@
 :caption: Contents
 
 overview
-cli_reference
+spatial_input
 datacube
 pixel_phenology
-spatial_input
+cli_reference
 smoothing
 metrics
 output

@@ -1,8 +1,11 @@
-# CLI Reference
+# Phenology Pipeline — CLI Reference
 
 This page covers the **phenology pipeline** CLI (`src/vi_phenology.py`).
-For the netCDF datacube pipeline CLI, see [netCDF Datacube Pipeline](datacube.md).
-For the pixel phenology pipeline CLI, see [Pixel Phenology Pipeline](pixel_phenology.md).
+
+| Other pipeline CLIs | |
+|---|---|
+| netCDF datacube pipeline | [netCDF Datacube Pipeline → CLI Reference](datacube.md#cli-reference) |
+| Pixel phenology pipeline | [Pixel Phenology Pipeline → CLI Reference](pixel_phenology.md#cli-reference) |
 
 The recommended way to run either pipeline is via `run_phenology.sh` — edit its variables
 and run `./run_phenology.sh`. All parameters are documented with inline comments inside the script.

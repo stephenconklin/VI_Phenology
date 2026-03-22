@@ -1,5 +1,15 @@
 # Spatial Input
 
+This page covers polygon-based spatial input for the **phenology** and **netCDF datacube**
+pipelines. Both accept `--shapefile` to clip processing to one or more polygon regions.
+
+> **Pixel phenology pipeline:** Does **not** use `--shapefile` or `--netcdf-dir`. It
+> reads pre-clipped datacubes produced by the netCDF datacube pipeline — the spatial
+> boundary is already embedded in those files. See
+> [Pixel Phenology Pipeline](pixel_phenology.md).
+
+---
+
 `--shapefile` accepts any vector format readable by GeoPandas/Fiona:
 
 | Format | Extension(s) |
@@ -115,54 +125,11 @@ pixel pools per date.
 
 ### netCDF Datacube Pipeline
 
-The datacube pipeline preserves the full spatial dimension and must explicitly merge
-tile arrays. The merge strategy depends on the CRS relationships between tiles:
+The datacube pipeline preserves the full spatial dimension and merges tiles based on
+their CRS relationships: same-UTM-zone tiles are mosaiced without resampling; tiles
+spanning a UTM zone boundary are bilinearly reprojected to the dominant CRS before
+merging. Merge behavior is controlled by `MERGE_SAME_CRS` and `MERGE_CROSS_CRS` in
+`run_phenology.sh`.
 
-#### Same UTM Zone (same CRS)
-
-Adjacent HLS MGRS tiles in the same UTM zone share an **identical 30-m pixel grid**.
-Tiles are mosaiced without resampling via a memory-bounded direct write loop:
-
-- Time union: the merged datacube covers all acquisition dates from all tiles
-- No resampling — pixel values are unmodified
-- The ~163-pixel MGRS overlap zone is filled by the last tile written (scientifically
-  equivalent to first-wins for co-acquired HLS pixels)
-
-**Enable/disable** in `run_phenology.sh`:
-
-```bash
-MERGE_SAME_CRS=true    # merge into one datacube per region (default)
-MERGE_SAME_CRS=false   # one file per tile, native CRS
-```
-
-#### Different UTM Zones (cross-CRS)
-
-When a polygon crosses a UTM zone boundary, the tiles are in different coordinate
-systems and cannot share a pixel grid without reprojection.
-
-The dominant CRS (the CRS group covering the most pixels within the polygon) is
-selected as the target. Minority tiles are bilinearly reprojected to the dominant CRS,
-then mosaiced via the same memory-bounded write loop.
-
-Bilinear reprojection between adjacent UTM zones introduces sub-pixel mixing comparable
-to the sensor point spread function — scientifically acceptable for VI analysis at 30 m.
-The output file's global attributes record the target CRS and resampling method.
-
-**Enable/disable** in `run_phenology.sh`:
-
-```bash
-MERGE_CROSS_CRS=true   # reproject + merge into one datacube (default)
-MERGE_CROSS_CRS=false  # one file per tile, native CRS, no reprojection
-```
-
-#### Merge Strategy Summary
-
-| Condition | Result |
-|---|---|
-| 1 tile | Single file, native CRS |
-| N tiles, same CRS, `MERGE_SAME_CRS=true` | 1 merged file, no resampling |
-| N tiles, same CRS, `MERGE_SAME_CRS=false` | N files, one per tile |
-| N tiles, mixed CRS, `MERGE_CROSS_CRS=true` | 1 merged file, minority tiles bilinearly reprojected |
-| N tiles, mixed CRS, `MERGE_CROSS_CRS=false` | N files, one per tile, native CRS |
-
-For complete datacube pipeline documentation, see [netCDF Datacube Pipeline](datacube.md).
+For the full merge algorithm, CRS detection logic, and merge options, see
+[netCDF Datacube Pipeline — Multi-Tile and Multi-CRS Handling](datacube.md#multi-tile-and-multi-crs-handling).

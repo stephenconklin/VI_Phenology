@@ -41,7 +41,7 @@ and the region label is `full_extent`.
 |------|-------------|
 | `{VI}_{region}_observations.csv` | **Actual HLS observations only** — date, vi_raw, vi_count, vi_std, vi_smooth (at obs dates). No gap-filled rows. |
 | `{VI}_{shapefile_stem}_timeseries.csv` | All regions stacked with `region` column — same columns as observations CSV above. Written to shapefile root folder when `--shapefile-field` yields multiple regions. |
-| `{VI}_{region}_metrics.csv` | Phenological metrics per year for this region |
+| `{VI}_{region}_metrics.csv` | Phenological metrics per year for this region. For column definitions, see [Phenological Metrics](metrics.md). |
 | `{VI}_{shapefile_stem}_metrics.csv` | Combined metrics for all regions in a shapefile (when `--shapefile-field` is set) |
 | `{VI}_{region}_timeseries.png/html` | Full temporal range: smooth curve + observation scatter + ±1 std band |
 | `{VI}_{region}_annual.png/html` | VI vs month, one line per year + multi-year mean overlay |
@@ -156,7 +156,7 @@ VI and `region_label` are parsed from the input datacube filename:
 
 | File | Description |
 |------|-------------|
-| `{VI}_{region_label}_pixel_metrics.nc` | CF-1.8 NetCDF with 19 metric bands (one per phenological metric), zlib compressed (complevel=4). One file per (VI, region_label). |
+| `{VI}_{region_label}_pixel_metrics.nc` | CF-1.8 NetCDF with 19 metric bands, zlib compressed (complevel=4). One file per (VI, region_label). For band definitions, see [Pixel Phenology Pipeline — Metrics](pixel_phenology.md#metrics-19). |
 | `{VI}_{region_label}_pixel_metrics_summary.csv` | Spatial statistics per metric: mean, std, p05, p50, p95, n_valid_pixels |
 | `pixel_phenology_{timestamp}.log` | Timestamped log file written to `--output-dir` root |
 

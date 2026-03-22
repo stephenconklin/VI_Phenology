@@ -23,6 +23,49 @@ processing (`--workers`), date range filtering, and per-region shapefile splitti
 Select the pipeline via the `PIPELINE` variable in `run_phenology.sh`, or invoke each
 script directly from the CLI.
 
+---
+
+## Typical Workflows
+
+### Workflow A — ROI-mean phenology (most common)
+
+```
+Step 1 (recommended): PIPELINE="netcdf_datacube"
+  Clips source tiles to your polygon → produces *_datacube.nc files per region
+
+Step 2: PIPELINE="phenology"  (--input-datacubes mode)
+  Reads those datacubes directly — skips tile clipping on every re-run
+  Change smoothing, thresholds, or plot settings without re-processing source tiles
+```
+
+Or in a single pass without intermediate datacubes:
+```
+  PIPELINE="phenology"  (--netcdf-dir + --shapefile mode)
+  Discovers tiles, clips, aggregates, smooths, and plots in one run
+```
+
+### Workflow B — Per-pixel phenological metric maps
+
+```
+Step 1 (required): PIPELINE="netcdf_datacube"
+  Clips source tiles → *_datacube.nc files
+
+Step 2: PIPELINE="pixel_phenology"
+  Reads those datacubes → 19-band metric map NetCDF per region
+```
+
+> `pixel_phenology` requires datacubes from `netcdf_datacube` — there is no direct
+> path from raw tiles to pixel metric maps.
+
+### Workflow C — Per-pixel datacubes for external analysis
+
+```
+  PIPELINE="netcdf_datacube"
+  Clips source tiles → *_datacube.nc files ready for your own downstream tools
+```
+
+---
+
 ### Phenology pipeline (`vi_phenology.py`)
 
 Extracts spatially aggregated ROI-mean time series and produces:

@@ -252,6 +252,21 @@ hemisphere label; rebuilding the source NetCDFs with step 03 fully resolves this
 
 ---
 
+## Next Steps
+
+The datacubes produced by this pipeline can be used as input for two other pipelines:
+
+**[Pixel Phenology Pipeline](pixel_phenology.md)** — compute 19 per-pixel phenological
+metric maps from these datacubes. Point `PIXEL_INPUT_DATACUBES` at the output directory
+(e.g. `${OUTPUT_DIR}/LVIS_flightboxes_final`) to pick up all regions automatically.
+
+**[Phenology Pipeline — Datacube Input Mode](cli_reference.md#input)** — run the phenology
+pipeline without re-running tile discovery or clipping. Set `INPUT_DATACUBES` in
+`run_phenology.sh` to the same directory. Faster for iterating on smoothing settings,
+thresholds, or plot styles.
+
+---
+
 ## Notes on Same-Day Multi-Sensor Acquisitions
 
 HLS combines Landsat 8, Landsat 9, Sentinel-2A, and Sentinel-2B. When two or more of

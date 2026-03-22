@@ -1,4 +1,13 @@
-# Phenological Metrics
+# Phenological Metrics — Phenology Pipeline
+
+This page covers metrics computed by the **phenology pipeline** (`src/vi_phenology.py`):
+one row per year per region in a CSV, enabled with the `--metrics` flag.
+
+The **pixel phenology pipeline** computes a related but distinct set of 19 per-pixel
+metrics stored as spatial map layers (one band per metric in a NetCDF). See
+[Pixel Phenology Pipeline — Metrics](pixel_phenology.md#metrics-19).
+
+---
 
 Computed per year, per region, per VI from the smoothed daily series. Enable with `--metrics`.
 Requires a smoothing method (`--smooth-method` must not be `none`).

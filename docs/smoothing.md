@@ -1,4 +1,12 @@
-# Smoothing
+# Smoothing — Phenology Pipeline
+
+This page covers smoothing for the **phenology pipeline** (`src/vi_phenology.py`).
+
+The **pixel phenology pipeline** uses the Whittaker smoother exclusively and has no
+`--smooth-method` argument — only `--smooth-lambda`. See
+[Pixel Phenology Pipeline — Whittaker Smoothing](pixel_phenology.md#whittaker-smoothing).
+
+---
 
 Smoothing is applied using an **obs-first** strategy: the filter is applied to raw observation
 dates only (not to the gap-filled daily series), then the result is interpolated to a complete

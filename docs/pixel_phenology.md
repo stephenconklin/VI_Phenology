@@ -1,9 +1,14 @@
 # Pixel Phenology Pipeline
 
-The `pixel_phenology` pipeline reads per-pixel datacubes produced by the
-[netCDF Datacube Pipeline](datacube.md) and computes 19 phenological metrics for every
-pixel on the same spatial grid. The output is one CF-1.8 NetCDF per (VI, region) containing
-one spatial layer per metric, plus a summary CSV with spatial statistics per metric.
+> **Prerequisite:** This pipeline reads datacubes produced by the
+> [netCDF Datacube Pipeline](datacube.md). Run that pipeline first to produce
+> `*_datacube.nc` files, then point `PIXEL_INPUT_DATACUBES` at those files or
+> their parent directory.
+
+The `pixel_phenology` pipeline reads those per-pixel datacubes and computes 19
+phenological metrics for every pixel on the same spatial grid. The output is one
+CF-1.8 NetCDF per (VI, region) containing one spatial layer per metric, plus a
+summary CSV with spatial statistics per metric.
 
 ---
 
@@ -17,19 +22,21 @@ Use the pixel phenology pipeline when you need:
 Use the [phenology pipeline](cli_reference.md) when you need ROI-mean time series,
 smoothed curves aggregated over a region, or interactive HTML plots.
 
-The pixel phenology pipeline always requires datacubes from the `netcdf_datacube` pipeline
-as its input — run that pipeline first if datacubes do not yet exist.
-
 ---
 
 ## Selecting the Pipeline
 
-In `run_phenology.sh`, set the `PIPELINE` variable at the top of the file:
+This is a two-step workflow. In `run_phenology.sh`:
 
 ```bash
-PIPELINE="pixel_phenology"   # per-pixel metric maps (this pipeline)
-PIPELINE="netcdf_datacube"   # produce the input datacubes first
-PIPELINE="phenology"         # ROI-mean time series, metrics, plots
+# Step 1 — produce the input datacubes:
+PIPELINE="netcdf_datacube"
+
+# Step 2 — compute per-pixel metric maps from those datacubes:
+PIPELINE="pixel_phenology"
+
+# Separate workflow — ROI-mean time series, metrics, plots:
+PIPELINE="phenology"
 ```
 
 ---
