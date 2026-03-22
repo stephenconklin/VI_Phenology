@@ -127,6 +127,9 @@ metrics, and output files — is available at:
 **Stephen Conklin**, Geospatial Analyst — Pipeline architecture, orchestration, and all original code.
 [https://github.com/stephenconklin](https://github.com/stephenconklin)
 
+**G. Burch Fisher, PhD**, Research Scientist — Conceptual guidance and original code adapted for:
+- `src/pixel_phenology_extract.py` (Per-pixel phenological metric extraction from CF-1.8 datacubes)
+
 **AI Assistance:** This tool was developed with the assistance of Anthropic Claude / Claude Code. These tools assisted
 with code generation and refinement under the direction and review of the author.
 

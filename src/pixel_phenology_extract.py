@@ -41,7 +41,9 @@
 #   relative_peak_amplitude_mean
 #   valley_depth_mean
 #
-# Author:  Stephen Conklin <stephenconklin@gmail.com>
+# Authors: Stephen Conklin <stephenconklin@gmail.com>
+#          G. Burch Fisher, PhD — conceptual guidance and original code
+#                                 adapted for per-pixel metric extraction
 # License: MIT
 
 import argparse
