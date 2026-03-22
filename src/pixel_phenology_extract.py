@@ -53,6 +53,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import matplotlib.gridspec as gridspec
+from matplotlib.ticker import FuncFormatter
+
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
 from tqdm.auto import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
@@ -103,6 +113,421 @@ METRIC_NAMES = [
 ]
 
 _MIN_AMPLITUDE = 1e-6
+
+# ---------------------------------------------------------------------------
+# Metric metadata — human-readable labels, units, colormaps, group membership
+# ---------------------------------------------------------------------------
+# Each entry: (human_title, unit_label, mpl_colormap, group_name, plotly_colorscale)
+METRIC_META = {
+    # ── Peak ──────────────────────────────────────────────────────────────
+    "peak_ndvi_mean":              ("Mean Annual Peak NDVI",           "NDVI",           "YlGn",            "Peak",         "YlGn"),
+    "peak_ndvi_std":               ("Peak NDVI — Interannual Std",     "NDVI",           "YlOrRd",          "Peak",         "YlOrRd"),
+    "peak_doy_mean":               ("Mean Peak Day of Year",           "DOY",            "twilight_shifted", "Peak",         "Phase"),
+    "peak_doy_std":                ("Peak DOY — Interannual Std",      "Days",           "YlOrRd",          "Peak",         "YlOrRd"),
+    # ── Productivity ──────────────────────────────────────────────────────
+    "integrated_ndvi_mean":        ("Mean Integrated NDVI",            "NDVI·days yr⁻¹", "YlGn",            "Productivity", "YlGn"),
+    "integrated_ndvi_std":         ("Integrated NDVI — Interannual Std","NDVI·days",     "YlOrRd",          "Productivity", "YlOrRd"),
+    "greenup_rate_mean":           ("Mean Green-Up Rate",              "NDVI day⁻¹",    "PuBuGn",          "Productivity", "PuBuGn"),
+    "greenup_rate_std":            ("Green-Up Rate — Interannual Std", "NDVI day⁻¹",    "YlOrRd",          "Productivity", "YlOrRd"),
+    # ── Seasonality ───────────────────────────────────────────────────────
+    "floor_ndvi_mean":             ("Mean Dry-Season Floor NDVI",      "NDVI",           "YlOrBr",          "Seasonality",  "YlOrBr"),
+    "ceiling_ndvi_mean":           ("Mean Wet-Season Ceiling NDVI",    "NDVI",           "YlGn",            "Seasonality",  "YlGn"),
+    "season_length_mean":          ("Mean Season Length",              "Days",           "RdYlGn",          "Seasonality",  "RdYlGn"),
+    "season_length_std":           ("Season Length — Interannual Std", "Days",           "YlOrRd",          "Seasonality",  "YlOrRd"),
+    # ── Variability ───────────────────────────────────────────────────────
+    "cv":                          ("Coefficient of Variation",        "CV",             "OrRd",            "Variability",  "Oranges"),
+    "interannual_peak_range":      ("Interannual Peak NDVI Range",     "NDVI",           "PuRd",            "Variability",  "PuRd"),
+    "interannual_peak_std":        ("Interannual Peak NDVI Std",       "NDVI",           "YlOrRd",          "Variability",  "YlOrRd"),
+    # ── Bimodality ────────────────────────────────────────────────────────
+    "n_peaks_mean":                ("Mean Number of Peaks per Year",   "Peaks yr⁻¹",    "Blues",           "Bimodality",   "Blues"),
+    "peak_separation_mean":        ("Mean Peak Separation",            "Days",           "PuBu",            "Bimodality",   "PuBu"),
+    "relative_peak_amplitude_mean":("Mean Relative Peak Amplitude",    "Ratio",          "RdPu",            "Bimodality",   "RdPu"),
+    "valley_depth_mean":           ("Mean Valley Depth",               "Normalised",     "BuPu",            "Bimodality",   "BuPu"),
+}
+
+# Group display order and sidebar colors
+_GROUP_ORDER  = ["Peak", "Productivity", "Seasonality", "Variability", "Bimodality"]
+_GROUP_COLORS = {
+    "Peak":         "#d4edda",
+    "Productivity": "#cce5ff",
+    "Seasonality":  "#fff3cd",
+    "Variability":  "#f8d7da",
+    "Bimodality":   "#e2d9f3",
+}
+
+
+# ---------------------------------------------------------------------------
+# Overview figure
+# ---------------------------------------------------------------------------
+
+def _write_overview_figure(
+    out_nc_path: Path,
+    summary_csv_path: Path,
+    vi_name: str,
+    region_label: str,
+    config: dict,
+    datacube_path: Path,
+) -> Path:
+    """Render a print-quality 4×5 overview sheet of all 19 metric bands.
+
+    Reads the already-written output NetCDF and summary CSV to avoid keeping
+    the large out_array in memory. Returns the path to the saved PNG.
+    """
+    FILL = _FILL_F4 * 0.9  # threshold for masking fill pixels
+
+    # ── Load data ─────────────────────────────────────────────────────────
+    bands = {}
+    with nc4.Dataset(str(out_nc_path), "r") as ds:
+        y = np.array(ds.variables["y"][:])
+        x = np.array(ds.variables["x"][:])
+        for name in METRIC_NAMES:
+            raw = np.array(ds.variables[name][:], dtype=np.float64)
+            raw[raw >= FILL] = np.nan
+            bands[name] = raw
+
+    stats = pd.read_csv(summary_csv_path).set_index("metric")
+    extent = [x.min(), x.max(), y.min(), y.max()]
+
+    # ── Figure geometry ───────────────────────────────────────────────────
+    N_COLS, N_ROWS = 4, 5          # 20 slots: 19 metrics + 1 metadata panel
+    FIG_W, FIG_H  = 22, 28        # inches — tabloid/A1 portrait
+    fig = plt.figure(figsize=(FIG_W, FIG_H), dpi=300)
+    fig.patch.set_facecolor("#f7f7f7")
+
+    # Outer gridspec: left sidebar (group labels) + main panel area.
+    # left=0.07 gives the sidebar and y-axis tick labels enough room so they
+    # don't bleed into each other.
+    outer = gridspec.GridSpec(
+        1, 2, figure=fig,
+        width_ratios=[0.030, 0.970],
+        left=0.07, right=0.97,
+        top=0.93, bottom=0.03,
+        wspace=0.02,
+    )
+    # Main 4×5 grid
+    gs = gridspec.GridSpecFromSubplotSpec(
+        N_ROWS, N_COLS,
+        subplot_spec=outer[1],
+        hspace=0.55, wspace=0.30,
+    )
+
+    # ── Page header ───────────────────────────────────────────────────────
+    header_txt = (
+        f"{vi_name} Pixel Phenology — Region: {region_label}"
+    )
+    sub_txt = (
+        f"Whittaker λ={config['smooth_lambda']:.0f}  |  "
+        f"min obs={config['min_valid_obs']}  |  "
+        f"season threshold={config['season_threshold']:.2f}  |  "
+        f"peak prominence={config['peak_prominence']:.2f}  |  "
+        f"Generated {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}"
+    )
+    fig.text(0.50, 0.965, header_txt, ha="center", va="bottom",
+             fontsize=20, fontweight="bold", color="#1a1a1a")
+    fig.text(0.50, 0.955, sub_txt, ha="center", va="bottom",
+             fontsize=7.5, color="#555555")
+
+    # ── Group sidebar ─────────────────────────────────────────────────────
+    # Map each metric to its row slot to draw sidebar rectangles
+    sidebar_ax = fig.add_subplot(outer[0])
+    sidebar_ax.set_xlim(0, 1)
+    sidebar_ax.set_ylim(0, N_ROWS)
+    sidebar_ax.axis("off")
+
+    # Count rows per group to size the sidebar bands
+    group_rows = {}
+    row = 0
+    for name in METRIC_NAMES:
+        g = METRIC_META[name][3]
+        group_rows.setdefault(g, []).append(row // N_COLS)
+        row += 1
+
+    # Draw one rectangle per group spanning its rows
+    for g in _GROUP_ORDER:
+        if g not in group_rows:
+            continue
+        rows_in_group = sorted(set(group_rows[g]))
+        y_top    = N_ROWS - rows_in_group[0]
+        y_bottom = N_ROWS - rows_in_group[-1] - 1
+        rect = mpatches.FancyBboxPatch(
+            (0.05, y_bottom + 0.05), 0.90, (y_top - y_bottom) - 0.10,
+            boxstyle="round,pad=0.02",
+            facecolor=_GROUP_COLORS[g], edgecolor="#aaaaaa", linewidth=0.5,
+        )
+        sidebar_ax.add_patch(rect)
+        sidebar_ax.text(
+            0.50, (y_top + y_bottom) / 2,
+            g, ha="center", va="center",
+            fontsize=7, fontweight="bold", color="#333333",
+            rotation=90,
+        )
+
+    # ── Metric panels ─────────────────────────────────────────────────────
+    km_fmt = FuncFormatter(lambda v, _: f"{v/1000:.0f}k")
+
+    for idx, name in enumerate(METRIC_NAMES):
+        row_i, col_i = divmod(idx, N_COLS)
+        ax = fig.add_subplot(gs[row_i, col_i])
+        ax.set_facecolor("#dddddd")    # shows as grey for fully-NaN edges
+
+        title, unit, cmap, group, _plotly_cs = METRIC_META[name]
+        data = bands[name]
+
+        valid = data[~np.isnan(data)]
+        if len(valid) == 0:
+            ax.set_title(title, fontsize=6.5, fontweight="bold", pad=3)
+            ax.text(0.5, 0.5, "No valid data", transform=ax.transAxes,
+                    ha="center", va="center", fontsize=7, color="#888888")
+            ax.axis("off")
+            continue
+
+        vmin = np.nanpercentile(data, 2)
+        vmax = np.nanpercentile(data, 98)
+        if vmin == vmax:
+            vmax = vmin + 1e-6
+
+        im = ax.imshow(
+            data, origin="upper", extent=extent,
+            cmap=cmap, vmin=vmin, vmax=vmax,
+            interpolation="nearest", aspect="auto",
+        )
+
+        # Colorbar
+        cb = fig.colorbar(im, ax=ax, fraction=0.038, pad=0.02, shrink=0.88)
+        cb.set_label(unit, fontsize=6, labelpad=2)
+        cb.ax.tick_params(labelsize=5.5)
+        cb.ax.yaxis.set_major_locator(plt.MaxNLocator(nbins=5))
+
+        # Title
+        ax.set_title(title, fontsize=6.8, fontweight="bold", pad=3,
+                     color="#1a1a1a")
+
+        # Subtitle: spatial mean ± std from summary CSV
+        if name in stats.index:
+            row_s = stats.loc[name]
+            sub = (f"μ={row_s['mean']:.3g}  σ={row_s['std']:.3g}  "
+                   f"n={int(row_s['n_valid_pixels']):,}")
+        else:
+            sub = ""
+        ax.set_xlabel(sub, fontsize=5.5, color="#444444", labelpad=2)
+
+        # Axis formatting
+        ax.xaxis.set_major_formatter(km_fmt)
+        ax.yaxis.set_major_formatter(km_fmt)
+        ax.tick_params(labelsize=5, length=2, pad=1)
+        # Only label y-axis on left-column panels to avoid crowding the sidebar
+        if col_i == 0:
+            ax.set_ylabel("Northing (m)", fontsize=5, labelpad=1)
+        else:
+            ax.set_ylabel("")
+
+        # Group background tint on panel face
+        ax.set_facecolor(_GROUP_COLORS[group])
+
+    # ── Metadata panel (slot 20) ──────────────────────────────────────────
+    meta_ax = fig.add_subplot(gs[4, 3])
+    meta_ax.axis("off")
+    meta_ax.set_facecolor("#eeeeee")
+    meta_lines = [
+        ("Source datacube", datacube_path.name),
+        ("Region", region_label),
+        ("VI", vi_name),
+        ("Whittaker λ", f"{config['smooth_lambda']:.0f}"),
+        ("Min valid obs", str(config["min_valid_obs"])),
+        ("Min obs / year", str(config["min_valid_obs_per_year"])),
+        ("Season threshold", f"{config['season_threshold']:.2f}"),
+        ("Peak prominence", f"{config['peak_prominence']:.2f}"),
+        ("Peak min distance", f"{config['peak_min_distance_days']} days"),
+        ("Total metrics", "19"),
+        ("Generated (UTC)", datetime.utcnow().strftime("%Y-%m-%d %H:%M")),
+    ]
+    y_pos = 0.96
+    meta_ax.text(0.5, y_pos + 0.03, "Processing Parameters",
+                 transform=meta_ax.transAxes,
+                 ha="center", va="top", fontsize=7.5, fontweight="bold",
+                 color="#1a1a1a")
+    for label, value in meta_lines:
+        y_pos -= 0.075
+        meta_ax.text(0.04, y_pos, f"{label}:", transform=meta_ax.transAxes,
+                     ha="left", va="top", fontsize=6, color="#555555",
+                     fontweight="bold")
+        meta_ax.text(0.96, y_pos, value, transform=meta_ax.transAxes,
+                     ha="right", va="top", fontsize=6, color="#1a1a1a")
+    # Thin border
+    for spine in meta_ax.spines.values():
+        spine.set_visible(True)
+        spine.set_edgecolor("#bbbbbb")
+        spine.set_linewidth(0.5)
+
+    # ── Save ──────────────────────────────────────────────────────────────
+    out_fig_path = out_nc_path.parent / out_nc_path.name.replace(
+        "_pixel_metrics.nc", "_pixel_metrics_overview.png"
+    )
+    fig.savefig(str(out_fig_path), dpi=300, bbox_inches="tight",
+                facecolor=fig.get_facecolor())
+    plt.close(fig)
+    return out_fig_path
+
+
+# ---------------------------------------------------------------------------
+# Interactive HTML overview (Plotly)
+# ---------------------------------------------------------------------------
+
+# Target max pixels per panel for the HTML version.  Downsampling keeps the
+# HTML file at a practical size (~10–20 MB) while preserving spatial pattern.
+_HTML_MAX_PX = 40_000   # ~200×200 equivalent
+
+
+def _write_overview_html(
+    out_nc_path: Path,
+    summary_csv_path: Path,
+    vi_name: str,
+    region_label: str,
+    config: dict,
+    datacube_path: Path,
+) -> Path:
+    """Render an interactive Plotly HTML overview of all 19 metric bands.
+
+    Each panel is a heatmap; hovering shows easting, northing, and the
+    metric value with its unit.  Data are spatially downsampled to keep
+    the HTML file at a manageable size.
+    """
+    FILL = _FILL_F4 * 0.9
+
+    # ── Load and downsample ───────────────────────────────────────────────
+    bands = {}
+    with nc4.Dataset(str(out_nc_path), "r") as ds:
+        y_full = np.array(ds.variables["y"][:])
+        x_full = np.array(ds.variables["x"][:])
+        n_y, n_x = len(y_full), len(x_full)
+
+        # Compute a single downsample factor that keeps total pixels ≤ _HTML_MAX_PX
+        factor = max(1, int(np.ceil(np.sqrt((n_y * n_x) / _HTML_MAX_PX))))
+        y_ds = y_full[::factor]
+        x_ds = x_full[::factor]
+
+        for name in METRIC_NAMES:
+            raw = np.array(ds.variables[name][:], dtype=np.float32)
+            raw[raw >= FILL] = np.nan
+            bands[name] = raw[::factor, ::factor]
+
+    stats = pd.read_csv(summary_csv_path).set_index("metric")
+
+    # ── Build subplot grid ────────────────────────────────────────────────
+    N_COLS, N_ROWS = 4, 5
+    titles = []
+    for name in METRIC_NAMES:
+        t, unit, *_ = METRIC_META[name]
+        row_s = stats.loc[name] if name in stats.index else None
+        sub = (f"μ={row_s['mean']:.3g}  σ={row_s['std']:.3g}"
+               if row_s is not None else "")
+        titles.append(f"<b>{t}</b><br><sup>{sub}</sup>")
+    # 20th slot = metadata
+    titles.append("<b>Processing Parameters</b>")
+
+    fig = make_subplots(
+        rows=N_ROWS, cols=N_COLS,
+        subplot_titles=titles,
+        horizontal_spacing=0.06,
+        vertical_spacing=0.08,
+    )
+
+    # ── Add heatmap traces ────────────────────────────────────────────────
+    for idx, name in enumerate(METRIC_NAMES):
+        row_i = idx // N_COLS + 1
+        col_i = idx % N_COLS + 1
+        title, unit, _mpl, group, colorscale = METRIC_META[name]
+        data = bands[name]
+
+        valid = data[~np.isnan(data)]
+        zmin = float(np.nanpercentile(valid, 2))  if len(valid) else 0
+        zmax = float(np.nanpercentile(valid, 98)) if len(valid) else 1
+        if zmin == zmax:
+            zmax = zmin + 1e-6
+
+        heatmap = go.Heatmap(
+            z=data.tolist(),
+            x=x_ds.tolist(),
+            y=y_ds.tolist(),
+            colorscale=colorscale,
+            zmin=zmin,
+            zmax=zmax,
+            colorbar=dict(
+                title=dict(text=unit, side="right", font=dict(size=8)),
+                thickness=10,
+                len=0.18,
+                x=col_i / N_COLS - 0.01,
+                y=1 - (row_i - 0.5) / N_ROWS,
+                tickfont=dict(size=8),
+            ),
+            hovertemplate=(
+                f"<b>{title}</b><br>"
+                "Easting: %{x:.0f} m<br>"
+                "Northing: %{y:.0f} m<br>"
+                f"Value: %{{z:.4g}} {unit}"
+                "<extra></extra>"
+            ),
+            name=title,
+        )
+        fig.add_trace(heatmap, row=row_i, col=col_i)
+
+        fig.update_xaxes(title_text="Easting (m)", title_font_size=7,
+                         tickfont_size=6, row=row_i, col=col_i)
+        fig.update_yaxes(title_text="Northing (m)", title_font_size=7,
+                         tickfont_size=6, row=row_i, col=col_i)
+
+    # ── Metadata annotation (20th slot) ──────────────────────────────────
+    meta_lines = [
+        f"<b>Region:</b> {region_label}",
+        f"<b>VI:</b> {vi_name}",
+        f"<b>Source:</b> {datacube_path.name}",
+        f"<b>Whittaker λ:</b> {config['smooth_lambda']:.0f}",
+        f"<b>Min valid obs:</b> {config['min_valid_obs']}",
+        f"<b>Min obs / year:</b> {config['min_valid_obs_per_year']}",
+        f"<b>Season threshold:</b> {config['season_threshold']:.2f}",
+        f"<b>Peak prominence:</b> {config['peak_prominence']:.2f}",
+        f"<b>Peak min dist:</b> {config['peak_min_distance_days']} days",
+        f"<b>Generated (UTC):</b> {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
+    ]
+    fig.add_annotation(
+        text="<br>".join(meta_lines),
+        xref="paper", yref="paper",
+        x=0.98, y=0.04,
+        xanchor="right", yanchor="bottom",
+        showarrow=False,
+        font=dict(size=9, color="#333333"),
+        align="left",
+        bgcolor="#f0f0f0",
+        bordercolor="#aaaaaa",
+        borderwidth=1,
+        borderpad=8,
+    )
+
+    # ── Layout ────────────────────────────────────────────────────────────
+    fig.update_layout(
+        title=dict(
+            text=(
+                f"<b>{vi_name} Pixel Phenology — Region: {region_label}</b><br>"
+                f"<sup>Whittaker λ={config['smooth_lambda']:.0f}  |  "
+                f"min obs={config['min_valid_obs']}  |  "
+                f"Hover any panel for pixel values</sup>"
+            ),
+            x=0.5, xanchor="center",
+            font=dict(size=16),
+        ),
+        height=1800,
+        width=1600,
+        paper_bgcolor="#f7f7f7",
+        plot_bgcolor="#eeeeee",
+        showlegend=False,
+        font=dict(family="Arial, sans-serif"),
+    )
+
+    out_html_path = out_nc_path.parent / out_nc_path.name.replace(
+        "_pixel_metrics.nc", "_pixel_metrics_overview.html"
+    )
+    fig.write_html(str(out_html_path), include_plotlyjs="cdn")
+    return out_html_path
 
 
 # ---------------------------------------------------------------------------
@@ -396,8 +821,10 @@ def process_datacube(
     n_workers: int,
     start_date: str | None,
     end_date: str | None,
+    overview_figure: bool = True,
+    overview_html: bool = True,
 ) -> None:
-    """Extract 18 per-pixel metrics from one datacube and write outputs.
+    """Extract 19 per-pixel metrics from one datacube and write outputs.
 
     Args:
         datacube_path: Path to a *_datacube.nc file.
@@ -614,6 +1041,32 @@ def process_datacube(
     pd.DataFrame(rows).to_csv(csv_path, index=False)
     logger.info("Saved summary CSV → %s", csv_path)
 
+    # ── Overview figure (PNG) ─────────────────────────────────────────────
+    if overview_figure:
+        logger.info("Rendering overview figure ...")
+        fig_path = _write_overview_figure(
+            out_nc_path=out_nc_path,
+            summary_csv_path=csv_path,
+            vi_name=vi_name,
+            region_label=region_label,
+            config=config,
+            datacube_path=datacube_path,
+        )
+        logger.info("Saved overview figure → %s", fig_path)
+
+    # ── Overview figure (HTML) ────────────────────────────────────────────
+    if overview_html:
+        logger.info("Rendering interactive HTML overview ...")
+        html_path = _write_overview_html(
+            out_nc_path=out_nc_path,
+            summary_csv_path=csv_path,
+            vi_name=vi_name,
+            region_label=region_label,
+            config=config,
+            datacube_path=datacube_path,
+        )
+        logger.info("Saved interactive HTML → %s", html_path)
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -728,6 +1181,22 @@ def parse_args():
         ),
     )
 
+    # --- Output options ---
+    parser.add_argument(
+        "--no-overview-figure", action="store_true", default=False,
+        help=(
+            "Skip the print-quality 19-panel overview PNG. "
+            "By default an overview figure is generated for every datacube."
+        ),
+    )
+    parser.add_argument(
+        "--no-overview-html", action="store_true", default=False,
+        help=(
+            "Skip the interactive Plotly HTML overview. "
+            "By default an HTML file with hover-enabled maps is generated for every datacube."
+        ),
+    )
+
     # --- Logging ---
     parser.add_argument(
         "--log-level", default="INFO",
@@ -797,6 +1266,8 @@ def main():
             n_workers=args.workers,
             start_date=args.start_date,
             end_date=args.end_date,
+            overview_figure=not args.no_overview_figure,
+            overview_html=not args.no_overview_html,
         )
 
     logger.info("Done. All outputs written to: %s", output_dir)
