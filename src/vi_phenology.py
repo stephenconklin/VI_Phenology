@@ -24,6 +24,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+from tqdm.auto import tqdm
 
 from phenology_config import PhenologyConfig
 from extract import (
@@ -506,7 +507,10 @@ def main():
     any_extracted = False
 
     # ── Per-region streaming pipeline ────────────────────────────────────────
-    for region_idx, region_item in enumerate(regions_iter, start=1):
+    for region_idx, region_item in enumerate(
+        tqdm(regions_iter, desc="Regions", unit="region", total=n_regions),
+        start=1,
+    ):
 
         if config.input_datacubes:
             region_label, vi_dc_pairs = region_item

@@ -26,6 +26,8 @@ import rioxarray  # noqa: F401 — activates .rio accessor
 import geopandas as gpd
 from pathlib import Path
 from typing import Optional
+from tqdm.auto import tqdm
+from tqdm.contrib.logging import logging_redirect_tqdm
 
 from phenology_config import PhenologyConfig
 from io_utils import sanitize_label, load_shapefile_regions, read_netcdf_crs
@@ -413,10 +415,11 @@ def select_pixel_sample(
     # pixel_dict: (y_r, x_r) -> [ndvi_sum, valid_count, total_n_time]
     pixel_dict: dict = {}
 
-    with ProcessPoolExecutor(max_workers=n_workers) as executor:
+    with logging_redirect_tqdm(), ProcessPoolExecutor(max_workers=n_workers) as executor:
         futures = {executor.submit(_compute_pixel_stats_one_tile, item): item
                    for item in work_items}
-        for future in as_completed(futures):
+        for future in tqdm(as_completed(futures), total=len(futures),
+                           desc="Phase A tiles", unit="tile", leave=False):
             result = future.result()
             if result['status'] != 'ok' or not result['pixels']:
                 continue
@@ -561,9 +564,10 @@ def aggregate_across_tiles(
     date_stats: dict = {}
     n_tiles_used = 0
 
-    with ProcessPoolExecutor(max_workers=n_workers) as executor:
+    with logging_redirect_tqdm(), ProcessPoolExecutor(max_workers=n_workers) as executor:
         futures = {executor.submit(_process_one_tile, item): item for item in work_items}
-        for future in as_completed(futures):
+        for future in tqdm(as_completed(futures), total=len(futures),
+                           desc="Tiles", unit="tile", leave=False):
             result = future.result()
             tile_name = result['tile_name']
 
