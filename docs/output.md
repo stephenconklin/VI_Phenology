@@ -39,7 +39,7 @@ and the region label is `full_extent`.
 
 | File | Description |
 |------|-------------|
-| `{VI}_{region}_observations.csv` | **Actual HLS observations only** — date, vi_raw, vi_count, vi_std, vi_smooth (at obs dates). No gap-filled rows. |
+| `{VI}_{region}_observations.csv` | **Actual HLS observations only** — date, vi_raw, vi_count, vi_std, vi_smooth (at obs dates). No gap-filled rows. `vi_raw` = spatial mean (default) or median (`--use-median`). `vi_std` = pooled std dev (mean mode) or IQR Q75−Q25 (median mode). |
 | `{VI}_{shapefile_stem}_timeseries.csv` | All regions stacked with `region` column — same columns as observations CSV above. Written to shapefile root folder when `--shapefile-field` yields multiple regions. |
 | `{VI}_{region}_metrics.csv` | Phenological metrics per year for this region. For column definitions, see [Phenological Metrics](metrics.md). |
 | `{VI}_{shapefile_stem}_metrics.csv` | Combined metrics for all regions in a shapefile (when `--shapefile-field` is set) |

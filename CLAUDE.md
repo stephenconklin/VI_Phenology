@@ -545,6 +545,33 @@ Phase B  (extraction — always runs)
 
 Phase A only runs when at least one of `n_sample`, `min_ndvi_mean`, or `min_quality_frac > 0` is set. When all are at defaults, extraction is identical to the original wall-to-wall approach.
 
+### Spatial Aggregation — Mean vs Median (datacube input mode only)
+
+`--use-median` (`USE_MEDIAN=true` in config) switches the per-time-step spatial aggregation
+in `aggregate_from_datacube()` from mean+std to median+IQR.
+
+**When to use median:** VI distributions across sampled pixels are often right-skewed in
+heterogeneous landscapes (mixed canopy cover, field boundaries, terrain shadows that pass
+the valid-range filter). The median is more robust and represents the "typical pixel" rather
+than being pulled by outliers. With small pixel samples (e.g. n=20), a single anomalous
+pixel shifts the mean by 5%; the median is immune.
+
+**`vi_std` column meaning:**
+- Mean mode (default): pooled sample standard deviation
+- Median mode: IQR = Q75 − Q25 (same units as VI, robust spread measure)
+
+Column name stays `vi_std` in both modes for schema consistency; downstream layers
+(smooth, metrics, plot) do not use `vi_std`.
+
+**Same-day duplicate handling (L30 + S30):** In median mode, pixel values from all
+time steps on the same calendar date are pooled before computing median — matching the
+correctness of the mean branch's sum/count pooling.
+
+**Restriction:** datacube input mode only. A warning is logged if `--use-median` is set
+with `--netcdf-dir` (standard tile mode), where it is ignored. `aggregate_across_tiles()`
+always uses mean — pooled medians cannot be computed from partial-tile worker results
+without returning all raw pixel values across the process boundary.
+
 ### Valid Range Application
 Apply `--valid-range-{vi}` at extraction time (Layer 0 for phenology; Phase 1 worker for datacube),
 before spatial aggregation or output. Pixels outside `[vmin, vmax]` → NaN.

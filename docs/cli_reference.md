@@ -85,6 +85,14 @@ Randomly samples a fixed set of N pixels per region — used consistently across
 
 ---
 
+## Spatial Aggregation
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--use-median` | off (mean) | Aggregate pixels spatially using the **median** instead of the mean at each time step. More robust to skewed VI distributions and outlier pixels when the ROI spans a vegetation gradient. `vi_std` in the observations CSV will hold **IQR (Q75−Q25)** instead of pooled standard deviation. **Datacube input mode only** (`--input-datacubes`); ignored in standard mode. Set via `USE_MEDIAN=true` in `config.local.env`. |
+
+---
+
 ## Plotting
 
 | Argument | Default | Description |

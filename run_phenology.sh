@@ -127,6 +127,11 @@ elif [ "$PIPELINE" = "phenology" ]; then
         MIN_QUALITY_FRAC_FLAG="--min-quality-frac $MIN_QUALITY_FRAC"
     fi
 
+    USE_MEDIAN_FLAG=""
+    if [ "${USE_MEDIAN:-false}" = true ]; then
+        USE_MEDIAN_FLAG="--use-median"
+    fi
+
     # Common flags passed to vi_phenology.py regardless of input mode.
     _PHENO_COMMON_FLAGS=(
         --vi               $VI
@@ -149,6 +154,7 @@ elif [ "$PIPELINE" = "phenology" ]; then
         $RANDOM_SEED_FLAG
         $MIN_NDVI_MEAN_FLAG
         $MIN_QUALITY_FRAC_FLAG
+        $USE_MEDIAN_FLAG
         --plot-style       "$PLOT_STYLE"
         --plot-format      $PLOT_FORMAT
         --workers          "$WORKERS"

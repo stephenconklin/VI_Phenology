@@ -83,6 +83,11 @@ class PhenologyConfig:
     plot_anomaly: bool = True            # anomaly (departure from multi-year mean) plot
     plot_multi_vi: bool = True           # multi-VI comparison plot
 
+    # Spatial aggregation method — datacube input mode only
+    # True  → spatial median per time step; vi_std column holds IQR (Q75−Q25)
+    # False → spatial mean per time step;   vi_std column holds pooled std dev (default)
+    use_median: bool = False
+
     def __post_init__(self):
         """Validate configuration values at construction time."""
         # Internal registry: region_label → shapefile stem. Populated by enumerate_regions

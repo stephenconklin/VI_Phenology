@@ -215,6 +215,17 @@ def parse_args():
         ),
     )
 
+    # --- Spatial aggregation (datacube input mode only) ---
+    parser.add_argument(
+        "--use-median", action="store_true",
+        help=(
+            "Aggregate pixels spatially using the median instead of the mean at each "
+            "time step. More robust to skewed VI distributions and outlier pixels. "
+            "vi_std in output CSV holds IQR (Q75−Q25) instead of pooled std dev. "
+            "Datacube input mode only (--input-datacubes); ignored in standard mode."
+        ),
+    )
+
     # --- Plotting style/format ---
     parser.add_argument(
         "--plot-style", default="combined",
@@ -394,6 +405,7 @@ def main():
         plot_timeseries=not args.no_plot_timeseries,
         plot_anomaly=not args.no_plot_anomaly,
         plot_multi_vi=not args.no_plot_multi_vi,
+        use_median=args.use_median,
     )
 
     config.output_dir.mkdir(parents=True, exist_ok=True)
@@ -459,6 +471,16 @@ def main():
         "  Obs thresholds  : min_valid_obs=%d  min_valid_obs_per_year=%d",
         config.min_valid_obs, config.min_valid_obs_per_year,
     )
+
+    # Spatial aggregation — only meaningful in datacube mode; warn if set in standard mode.
+    if config.use_median:
+        if config.input_datacubes:
+            logger.info("  Aggregation     : median  (vi_std = IQR Q75−Q25)")
+        else:
+            logger.warning(
+                "--use-median is only supported in datacube input mode "
+                "(--input-datacubes). It will be ignored in standard mode."
+            )
 
     # Pixel sampling — only logged when active.
     if config.sample_pixels is not None or config.min_ndvi_mean is not None or config.min_quality_frac > 0:
@@ -547,6 +569,7 @@ def main():
                     random_seed=config.random_seed,
                     min_ndvi_mean=config.min_ndvi_mean,
                     min_quality_frac=config.min_quality_frac,
+                    use_median=config.use_median,
                 )
                 if obs_df.empty:
                     logger.warning(

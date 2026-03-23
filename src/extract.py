@@ -646,6 +646,7 @@ def aggregate_from_datacube(
     random_seed: Optional[int] = None,
     min_ndvi_mean: Optional[float] = None,
     min_quality_frac: float = 0.0,
+    use_median: bool = False,
 ) -> pd.DataFrame:
     """Aggregate Layer 0 observations from a pre-clipped per-pixel datacube.
 
@@ -805,53 +806,79 @@ def aggregate_from_datacube(
                                      coords={'y': da.coords['y'], 'x': da.coords['x']})
         masked = masked.where(pixel_mask_da)
 
-    # ── Spatial aggregation per time step ───────────────────────────────────
-    agg_sum    = np.zeros(n_time, dtype=np.float64)
-    agg_count  = np.zeros(n_time, dtype=np.int64)
-    agg_sum_sq = np.zeros(n_time, dtype=np.float64)
-    dc_desc = dc_path.stem.replace("_datacube", "")
-    with logging_redirect_tqdm(), dask.config.set(scheduler='synchronous'):
-        for t in tqdm(range(n_time), desc=dc_desc, unit="step", leave=False):
-            s2d = masked.isel(time=t).values
-            valid = ~np.isnan(s2d)
-            c = int(valid.sum())
-            agg_count[t] = c
-            if c > 0:
-                v = s2d[valid].astype(np.float64)
-                agg_sum[t]    = v.sum()
-                agg_sum_sq[t] = (v * v).sum()
-
     # Normalize timestamps to midnight — HLS datacubes can contain both Landsat
     # (L30) and Sentinel-2 (S30) acquisitions on the same calendar date, producing
-    # duplicate time steps. Pool same-day pixel stats before computing the mean so
-    # the Layer 0 DataFrame has exactly one row per calendar date.
+    # duplicate time steps. Moved before the aggregation loop so both mean and
+    # median branches can group same-day acquisitions correctly.
     dates = pd.to_datetime(da.coords['time'].values).normalize()
 
-    # Accumulate sum / count / sum_sq per calendar date.
-    date_accum: dict = {}   # date -> [sum, count, sum_sq]
-    for i, date in enumerate(dates):
-        n = int(agg_count[i])
-        if n == 0:
-            continue
-        s  = float(agg_sum[i])
-        sq = float(agg_sum_sq[i])
-        if date not in date_accum:
-            date_accum[date] = [s, n, sq]
-        else:
-            date_accum[date][0] += s
-            date_accum[date][1] += n
-            date_accum[date][2] += sq
-
-    # Build Layer 0 DataFrame (observation dates only — vi_count > 0).
+    # ── Spatial aggregation per time step ───────────────────────────────────
+    dc_desc = dc_path.stem.replace("_datacube", "")
     rows = []
-    for date, (s, n, sq) in sorted(date_accum.items()):
-        mean = s / n
-        if n > 1:
-            var = max((sq - n * mean ** 2) / (n - 1), 0.0)
-            std = float(np.sqrt(var))
-        else:
-            std = np.nan
-        rows.append({'date': date, 'vi_raw': float(mean), 'vi_count': n, 'vi_std': std})
+
+    if use_median:
+        # Median mode: collect all valid pixel values per calendar date, then
+        # compute spatial median and IQR from the full per-day distribution.
+        # Same-day acquisitions (L30 + S30) are pooled before computing median,
+        # matching the correctness of the mean branch's sum pooling.
+        # vi_std holds IQR (Q75 − Q25) — same units as VI, robust spread measure.
+        date_pixels: dict = {}  # date -> list[float]
+        with logging_redirect_tqdm(), dask.config.set(scheduler='synchronous'):
+            for t in tqdm(range(n_time), desc=dc_desc, unit="step", leave=False):
+                date = dates[t]
+                s2d = masked.isel(time=t).values
+                valid = ~np.isnan(s2d)
+                if int(valid.sum()) > 0:
+                    if date not in date_pixels:
+                        date_pixels[date] = []
+                    date_pixels[date].extend(s2d[valid].tolist())
+
+        for date in sorted(date_pixels):
+            vals = np.asarray(date_pixels[date], dtype=np.float64)
+            n = len(vals)
+            iqr = float(np.percentile(vals, 75) - np.percentile(vals, 25)) if n > 1 else np.nan
+            rows.append({
+                'date': date,
+                'vi_raw': float(np.median(vals)),
+                'vi_count': n,
+                'vi_std': iqr,
+            })
+
+    else:
+        # Mean mode: accumulate sum / count / sum_of_squares per calendar date,
+        # then compute pooled spatial mean and sample standard deviation.
+        agg_sum    = np.zeros(n_time, dtype=np.float64)
+        agg_count  = np.zeros(n_time, dtype=np.int64)
+        agg_sum_sq = np.zeros(n_time, dtype=np.float64)
+        with logging_redirect_tqdm(), dask.config.set(scheduler='synchronous'):
+            for t in tqdm(range(n_time), desc=dc_desc, unit="step", leave=False):
+                s2d = masked.isel(time=t).values
+                valid = ~np.isnan(s2d)
+                c = int(valid.sum())
+                agg_count[t] = c
+                if c > 0:
+                    v = s2d[valid].astype(np.float64)
+                    agg_sum[t]    = v.sum()
+                    agg_sum_sq[t] = (v * v).sum()
+
+        date_accum: dict = {}   # date -> [sum, count, sum_sq]
+        for i, date in enumerate(dates):
+            n = int(agg_count[i])
+            if n == 0:
+                continue
+            s  = float(agg_sum[i])
+            sq = float(agg_sum_sq[i])
+            if date not in date_accum:
+                date_accum[date] = [s, n, sq]
+            else:
+                date_accum[date][0] += s
+                date_accum[date][1] += n
+                date_accum[date][2] += sq
+
+        for date, (s, n, sq) in sorted(date_accum.items()):
+            mean = s / n
+            std = float(np.sqrt(max((sq - n * mean ** 2) / (n - 1), 0.0))) if n > 1 else np.nan
+            rows.append({'date': date, 'vi_raw': float(mean), 'vi_count': n, 'vi_std': std})
 
     if not rows:
         logger.warning(
