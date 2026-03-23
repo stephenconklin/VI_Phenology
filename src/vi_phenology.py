@@ -475,7 +475,10 @@ def main():
     # Spatial aggregation — only meaningful in datacube mode; warn if set in standard mode.
     if config.use_median:
         if config.input_datacubes:
-            logger.info("  Aggregation     : median  (vi_std = IQR Q75−Q25)")
+            logger.info(
+                "  Aggregation     : median of all valid pixels per time step"
+                "  (vi_std column = IQR, i.e. Q75 − Q25 spread of those pixels)"
+            )
         else:
             logger.warning(
                 "--use-median is only supported in datacube input mode "
