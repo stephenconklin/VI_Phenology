@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pandas as pd
 from tqdm.auto import tqdm
+from tqdm.contrib.logging import logging_redirect_tqdm
 
 from phenology_config import PhenologyConfig
 from extract import (
@@ -507,6 +508,10 @@ def main():
     any_extracted = False
 
     # ── Per-region streaming pipeline ────────────────────────────────────────
+    # logging_redirect_tqdm activated manually so log messages print above the
+    # tqdm bar rather than on the same line (avoids reindenting the loop body).
+    _lrt = logging_redirect_tqdm()
+    _lrt.__enter__()
     for region_idx, region_item in enumerate(
         tqdm(regions_iter, desc="Regions", unit="region", total=n_regions),
         start=1,
@@ -648,6 +653,8 @@ def main():
 
         logger.info("══ Region '%s' complete ══", region_label)
         # region_raw and region_smoothed go out of scope here and are eligible for GC.
+
+    _lrt.__exit__(None, None, None)
 
     # ── Post-loop ─────────────────────────────────────────────────────────────
     if not any_extracted:

@@ -806,10 +806,20 @@ def aggregate_from_datacube(
         masked = masked.where(pixel_mask_da)
 
     # ── Spatial aggregation per time step ───────────────────────────────────
-    with dask.config.set(scheduler='synchronous'):
-        agg_sum    = masked.sum(dim=['y', 'x'], skipna=True).values.astype(np.float64)
-        agg_count  = masked.count(dim=['y', 'x']).values.astype(np.int64)
-        agg_sum_sq = (masked ** 2).sum(dim=['y', 'x'], skipna=True).values.astype(np.float64)
+    agg_sum    = np.zeros(n_time, dtype=np.float64)
+    agg_count  = np.zeros(n_time, dtype=np.int64)
+    agg_sum_sq = np.zeros(n_time, dtype=np.float64)
+    dc_desc = dc_path.stem.replace("_datacube", "")
+    with logging_redirect_tqdm(), dask.config.set(scheduler='synchronous'):
+        for t in tqdm(range(n_time), desc=dc_desc, unit="step", leave=False):
+            s2d = masked.isel(time=t).values
+            valid = ~np.isnan(s2d)
+            c = int(valid.sum())
+            agg_count[t] = c
+            if c > 0:
+                v = s2d[valid].astype(np.float64)
+                agg_sum[t]    = v.sum()
+                agg_sum_sq[t] = (v * v).sum()
 
     # Normalize timestamps to midnight — HLS datacubes can contain both Landsat
     # (L30) and Sentinel-2 (S30) acquisitions on the same calendar date, producing
