@@ -51,6 +51,15 @@ from io_utils import read_netcdf_crs, setup_log_file
 
 logger = logging.getLogger(__name__)
 
+# All-NaN slices are expected (pixels outside the polygon, or DOYs/months with
+# no observations). Suppress the RuntimeWarning at module level so it stays
+# silent even when multiple datacubes are processed in parallel threads.
+warnings.filterwarnings(
+    "ignore",
+    message="All-NaN slice encountered",
+    category=RuntimeWarning,
+)
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -199,9 +208,7 @@ def _iter_per_year_bands(da: xr.DataArray, times: pd.DatetimeIndex,
         all_nan_mask = np.all(np.isnan(sl), axis=0)
 
         for pct, suffix in ((50, "median"), (5, "p05"), (95, "p95")):
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                band = np.nanpercentile(sl, pct, axis=0).astype(np.float32)
+            band = np.nanpercentile(sl, pct, axis=0).astype(np.float32)
             band[all_nan_mask] = _FILL_F4
             yield band, f"year{yr}_{suffix}"
 
@@ -243,21 +250,17 @@ def _iter_per_month_bands(da: xr.DataArray, times: pd.DatetimeIndex,
                 continue
             sl = da.isel(time=idx).values.astype(np.float32)  # load this month-year only
             sl[(sl < vi_min) | (sl > vi_max)] = np.nan
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                per_yr_50.append(np.nanpercentile(sl, 50, axis=0))
-                per_yr_05.append(np.nanpercentile(sl,  5, axis=0))
-                per_yr_95.append(np.nanpercentile(sl, 95, axis=0))
+            per_yr_50.append(np.nanpercentile(sl, 50, axis=0))
+            per_yr_05.append(np.nanpercentile(sl,  5, axis=0))
+            per_yr_95.append(np.nanpercentile(sl, 95, axis=0))
 
         for year_stats, suffix in (
             (per_yr_50, "median"), (per_yr_05, "p05"), (per_yr_95, "p95")
         ):
             if year_stats:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    band = np.nanmean(
-                        np.stack(year_stats, axis=0), axis=0
-                    ).astype(np.float32)
+                band = np.nanmean(
+                    np.stack(year_stats, axis=0), axis=0
+                ).astype(np.float32)
                 band[np.isnan(band)] = _FILL_F4
             else:
                 band = np.full((n_y, n_x), _FILL_F4, dtype=np.float32)
@@ -302,9 +305,7 @@ def _iter_per_doy_bands(da: xr.DataArray, times: pd.DatetimeIndex,
             all_nan_mask = np.all(np.isnan(sl), axis=0)
 
             for pct, suffix in ((50, "median"), (5, "p05"), (95, "p95")):
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    band = np.nanpercentile(sl, pct, axis=0).astype(np.float32)
+                band = np.nanpercentile(sl, pct, axis=0).astype(np.float32)
                 band[all_nan_mask] = _FILL_F4
                 yield band, f"doy{doy:03d}_{suffix}"
 
