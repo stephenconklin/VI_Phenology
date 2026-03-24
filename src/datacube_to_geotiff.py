@@ -25,7 +25,7 @@
 #       Band names: doy001_median, doy001_p05, doy001_p95, ... doy365_p95
 #
 # NoData value: 9.96920996838687e+36 (NC_FILL_FLOAT — CF/NetCDF4 float32)
-# Compression : LZW  |  Tiling: 256×256  |  BigTIFF: IF_SAFER
+# Compression : LZW + predictor=2 (horizontal differencing)  |  Tiling: 256×256  |  BigTIFF: IF_SAFER
 #
 # Authors: Stephen Conklin <stephenconklin@gmail.com>
 # License: MIT
@@ -116,6 +116,7 @@ def _build_rasterio_profile(
         "crs":        CRS.from_wkt(crs_wkt),
         "transform":  transform,
         "compress":   "lzw",
+        "predictor":  2,
         "tiled":      True,
         "blockxsize": 256,
         "blockysize": 256,
