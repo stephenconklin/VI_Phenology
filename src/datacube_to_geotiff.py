@@ -59,6 +59,11 @@ warnings.filterwarnings(
     message="All-NaN slice encountered",
     category=RuntimeWarning,
 )
+warnings.filterwarnings(
+    "ignore",
+    message="Mean of empty slice",
+    category=RuntimeWarning,
+)
 
 
 # ---------------------------------------------------------------------------
