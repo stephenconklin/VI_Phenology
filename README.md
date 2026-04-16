@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey.svg)]()
 [![Docs](https://readthedocs.org/projects/vi-phenology/badge/?version=latest)](https://vi-phenology.readthedocs.io/en/latest/)
-[![Data: HLS_VI_Pipeline](https://img.shields.io/badge/data-HLS__VI__Pipeline-blue.svg)](https://github.com/stephenconklin/HLS_VI_Pipeline)
+[![Data: HLS_VI_Pipeline](https://img.shields.io/badge/data-HLS__VI__Pipeline-brightgreen.svg)](https://github.com/stephenconklin/HLS_VI_Pipeline)
 
 Vegetation index (VI) analysis toolkit for CF-1.8 compliant NetCDF time-series data.
 Designed to work natively with output from [HLS_VI_Pipeline](https://github.com/stephenconklin/HLS_VI_Pipeline),
